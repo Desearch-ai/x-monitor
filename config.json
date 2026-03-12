@@ -1,0 +1,105 @@
+{
+  "accounts": [
+    {
+      "username": "const",
+      "category": "bittensor",
+      "importance": "high",
+      "context": "Bittensor Founder - all posts are important, analyze for potential use in social campaigns",
+      "include_retweets": false
+    },
+    {
+      "username": "desearch_ai",
+      "category": "desearch",
+      "importance": "high",
+      "context": "Our own Desearch X account - track all activity",
+      "include_retweets": true
+    },
+    {
+      "username": "marclou",
+      "category": "influencer",
+      "importance": "normal",
+      "context": "Good influencer, startup founder, writes interesting content",
+      "include_retweets": false
+    },
+    {
+      "username": "johnrushx",
+      "category": "influencer",
+      "importance": "normal",
+      "context": "Good influencer, startup founder, writes interesting content",
+      "include_retweets": false
+    },
+    {
+      "username": "markjeffrey",
+      "category": "content",
+      "importance": "normal",
+      "context": "YouTuber - content creator",
+      "include_retweets": false
+    },
+    {
+      "username": "openclaw",
+      "category": "system",
+      "importance": "high",
+      "context": "OpenClaw - the platform our assistant system is built on",
+      "include_retweets": false
+    },
+    {
+      "username": "numinous_ai",
+      "category": "ai",
+      "importance": "normal",
+      "context": "AI account to monitor",
+      "include_retweets": false
+    },
+    {
+      "username": "SiamKidd",
+      "category": "bittensor",
+      "importance": "high",
+      "context": "Bittensor investor, invests in subnets - monitor all posts",
+      "include_retweets": false
+    },
+    {
+      "username": "ExaAILabs",
+      "category": "competitor",
+      "importance": "high",
+      "context": "Direct Desearch competitor - monitor all posts for competitive intel",
+      "include_retweets": false
+    }
+  ],
+  "keywords": [
+    {
+      "query": "#desearch",
+      "category": "brand",
+      "importance": "high",
+      "context": "Our brand hashtag - all mentions important"
+    },
+    {
+      "query": "@desearch_ai",
+      "category": "brand",
+      "importance": "high",
+      "context": "Direct mentions of our X account"
+    },
+    {
+      "query": "sn22 bittensor",
+      "category": "subnet",
+      "importance": "high",
+      "context": "Bittensor Subnet 22 community mentions"
+    },
+    {
+      "query": "subnet22",
+      "category": "subnet",
+      "importance": "high",
+      "context": "Subnet 22 mentions"
+    }
+  ],
+  "discord": {
+    "alerts_channel": "1477727527618347340"
+  },
+  "feishu": {
+    "doc_token": "",
+    "note": "Set this to your Feishu doc token. Get it from the URL: https://xxx.feishu.cn/docx/TOKEN_HERE"
+  },
+  "filters": {
+    "normal_importance_min_likes": 5,
+    "skip_replies": true,
+    "skip_retweets_for_normal": true
+  }
+}
