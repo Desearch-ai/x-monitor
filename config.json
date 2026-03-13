@@ -137,7 +137,9 @@
   },
   "feishu": {
     "doc_token": "",
-    "note": "Set this to your Feishu doc token. Get it from the URL: https://xxx.feishu.cn/docx/TOKEN_HERE"
+    "app_id": "",
+    "app_secret": "",
+    "note": "1) Create a Feishu Open Platform app at https://open.feishu.cn/app — enable 'docx:document' scope, install to workspace. 2) Paste app_id and app_secret here. 3) Set doc_token from the doc URL: https://xxx.feishu.cn/docx/TOKEN_HERE"
   },
   "filters": {
     "normal_importance_min_likes": 5,
