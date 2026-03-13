@@ -64,6 +64,13 @@
       "include_retweets": false
     },
     {
+      "username": "opentensor",
+      "category": "bittensor",
+      "importance": "high",
+      "context": "Official Bittensor/OpenTensor Foundation account - all announcements, updates and posts are critical",
+      "include_retweets": false
+    },
+    {
       "username": "DrocksAlex2",
       "category": "community",
       "importance": "high",
