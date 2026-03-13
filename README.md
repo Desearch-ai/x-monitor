@@ -34,10 +34,28 @@ export DESEARCH_API_KEY="your_key_from_console.desearch.ai"
 
 Or set it in `~/.zshrc` for permanent use.
 
-### 2. (Optional) Set Feishu Doc
+### 2. (Optional) Set Feishu Doc for Daily Digest
 
-Edit `config.json` and set `feishu.doc_token` to your doc token.
-Get it from the Feishu doc URL: `https://xxx.feishu.cn/docx/TOKEN`
+Edit `config.json` and fill in the `feishu` section:
+
+```json
+"feishu": {
+  "doc_token": "TOKEN_FROM_URL",
+  "app_id": "cli_xxxxx",
+  "app_secret": "xxxxxxxxxx"
+}
+```
+
+Steps:
+1. Go to https://open.feishu.cn/app → Create a new app
+2. Enable the `docx:document` permission scope
+3. Install the app to your workspace
+4. Copy `App ID` and `App Secret` into config.json
+5. Open or create the target Feishu doc, get `doc_token` from the URL:
+   `https://xxx.feishu.cn/docx/TOKEN_HERE`
+
+The digest script (`feishu_digest.py`) will append a dated section per category
+each time the cron runs and finds new tweets.
 
 ### 3. Test manually
 

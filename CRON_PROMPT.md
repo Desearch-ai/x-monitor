@@ -47,12 +47,20 @@ Category icons:
 
 ### Step 4: Save to Feishu (if doc_token configured)
 
-Read config.json to get feishu.doc_token. If empty, skip this step.
+Read config.json to check feishu.doc_token AND feishu.app_id. If either is empty, skip this step silently.
 
-If configured, append a brief summary to the doc:
-- Date/time
-- New tweets count  
-- Short summary per category
+If both are configured, pipe the monitor output to the digest writer:
+
+```bash
+cd /Users/giga/.openclaw/workspace/x-monitor && \
+  DESEARCH_API_KEY=$DESEARCH_API_KEY uv run python monitor.py | uv run python feishu_digest.py
+```
+
+The digest writer (`feishu_digest.py`) will:
+- Authenticate with Feishu using app_id + app_secret
+- Format new tweets grouped by category (bittensor, brand, competitor, influencer, etc.)
+- Append a dated section to the Feishu doc
+- Exit silently if total_new == 0
 
 ### Step 5: Handle errors
 
