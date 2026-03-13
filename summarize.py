@@ -184,26 +184,16 @@ def main():
         print(f"[ERROR] OpenRouter call failed: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Build final message
-    header = f"📡 <b>X Monitor Summary</b> — {now}\n📊 {len(tweets)} tweets analyzed\n\n"
-    full_message = header + summary
+    # Build final message (plain text for Discord)
+    import re
+    summary_clean = re.sub(r'<[^>]+>', '', summary)
+    header = f"📡 **X Monitor Summary** — {now}\n📊 {len(tweets)} tweets analyzed\n\n"
+    full_message = header + summary_clean
 
     print(full_message)
 
-    if not args.dry_run:
-        tg_chat = config.get("telegram", {}).get("summary_chat_id", "")
-        if not tg_chat:
-            print("[WARN] config.telegram.summary_chat_id not set. Set it in config.json.", file=sys.stderr)
-        else:
-            # Split if too long (Telegram limit 4096 chars)
-            if len(full_message) > 4000:
-                parts = [full_message[i:i+4000] for i in range(0, len(full_message), 4000)]
-            else:
-                parts = [full_message]
-
-            for part in parts:
-                ok = send_telegram(part, tg_chat)
-                print(f"Telegram send: {'✅' if ok else '❌'}", file=sys.stderr)
+    if args.clear and not args.dry_run:
+        pass  # cleared below
 
     if args.clear:
         clear_batch()
