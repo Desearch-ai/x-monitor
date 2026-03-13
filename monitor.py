@@ -154,7 +154,7 @@ def main():
         key = f"timeline:{username}"
         seen = set(seen_ids.get(key, []))
 
-        tweets, err = get_timeline(username, count=15)
+        tweets, err = get_timeline(username, count=50)
         stats["accounts_checked"] += 1
 
         if err:
@@ -227,7 +227,7 @@ def main():
         state["last_run"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
 
-    # ── Output ────────────────────────────────────────────────────────
+    # ── Save latest batch for summarizer ─────────────────────────────
     output = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "stats": stats,
@@ -235,6 +235,18 @@ def main():
         "new_tweets": new_tweets,
         "errors": errors,
     }
+
+    if not args.dry_run:
+        # Accumulate last 4h of tweets in a rolling buffer for summarizer
+        batch_file = SCRIPT_DIR / "latest_batch.json"
+        try:
+            existing = json.loads(batch_file.read_text()) if batch_file.exists() else []
+        except Exception:
+            existing = []
+        combined = existing + new_tweets
+        # Keep last 500 tweets max
+        batch_file.write_text(json.dumps(combined[-500:], ensure_ascii=False))
+    
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
 

@@ -17,21 +17,21 @@
     {
       "username": "marclou",
       "category": "influencer",
-      "importance": "normal",
+      "importance": "high",
       "context": "Good influencer, startup founder, writes interesting content",
       "include_retweets": false
     },
     {
       "username": "johnrushx",
       "category": "influencer",
-      "importance": "normal",
+      "importance": "high",
       "context": "Good influencer, startup founder, writes interesting content",
       "include_retweets": false
     },
     {
       "username": "markjeffrey",
       "category": "content",
-      "importance": "normal",
+      "importance": "high",
       "context": "YouTuber - content creator",
       "include_retweets": false
     },
@@ -45,7 +45,7 @@
     {
       "username": "numinous_ai",
       "category": "ai",
-      "importance": "normal",
+      "importance": "high",
       "context": "AI account to monitor",
       "include_retweets": false
     },
@@ -87,7 +87,7 @@
     {
       "username": "AlexFinn",
       "category": "builder",
-      "importance": "normal",
+      "importance": "high",
       "context": "Founder/CEO of Creator Buddy — AI trained on X posts, 300k ARR indie builder. May collaborate or mention us",
       "include_retweets": false
     },
@@ -149,8 +149,8 @@
     "note": "1) Create a Feishu Open Platform app at https://open.feishu.cn/app — enable 'docx:document' scope, install to workspace. 2) Paste app_id and app_secret here. 3) Set doc_token from the doc URL: https://xxx.feishu.cn/docx/TOKEN_HERE"
   },
   "filters": {
-    "normal_importance_min_likes": 5,
-    "skip_replies": true,
-    "skip_retweets_for_normal": true
+    "normal_importance_min_likes": 0,
+    "skip_replies": false,
+    "skip_retweets_for_normal": false
   }
 }
