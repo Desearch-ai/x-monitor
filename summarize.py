@@ -23,7 +23,7 @@ BATCH_FILE = SCRIPT_DIR / "latest_batch.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 
 OPENROUTER_API = "https://openrouter.ai/api/v1/chat/completions"
-MODEL = "nvidia/nemotron-3-super-120b-a12b:free"
+MODEL = "google/gemma-3-4b-it:free"
 
 
 def load_env():
@@ -59,7 +59,7 @@ def clear_batch():
 def format_tweets_for_llm(tweets: list) -> str:
     """Format tweets into a concise text for the LLM."""
     lines = []
-    for t in tweets[:120]:  # cap at 120 to stay within context
+    for t in tweets[:50]:  # cap at 50 to stay within context and keep LLM fast
         user = (t.get("user") or {}).get("username", "unknown")
         text = t.get("text", "").replace("\n", " ").strip()
         likes = t.get("like_count", 0) or 0
@@ -71,7 +71,7 @@ def format_tweets_for_llm(tweets: list) -> str:
 
         lines.append(
             f"[{category.upper()}] @{user} (❤{likes} 🔄{rts}) [{date}]\n"
-            f"  {text[:200]}\n"
+            f"  {text[:150]}\n"
             f"  {url}"
         )
     return "\n\n".join(lines)
@@ -101,7 +101,7 @@ def call_openrouter(prompt: str) -> str:
         method="POST",
     )
 
-    with urlopen(req, timeout=60) as resp:
+    with urlopen(req, timeout=25) as resp:
         result = json.loads(resp.read().decode())
 
     return result["choices"][0]["message"]["content"].strip()
