@@ -4,6 +4,7 @@ X Monitor - Fetches new tweets from monitored accounts and keywords.
 Uses Desearch AI API via the desearch.py skill script.
 
 Output: JSON with new tweets only (deduplicates against state.json)
+Also maintains tweets_window.json: all fetched tweets with timestamps (sliding 24h window)
 
 Usage:
     DESEARCH_API_KEY=xxx uv run python monitor.py
@@ -15,12 +16,13 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).parent
 STATE_FILE = SCRIPT_DIR / "state.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
+WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
 DESEARCH_SCRIPT = Path.home() / ".openclaw/workspace/skills/desearch-x-search/scripts/desearch.py"
 
 
@@ -35,6 +37,55 @@ def load_state() -> dict:
 
 def save_state(state: dict):
     STATE_FILE.write_text(json.dumps(state, indent=2))
+
+
+def load_window() -> list:
+    """Load the sliding tweet window (tweets_window.json)."""
+    if WINDOW_FILE.exists():
+        try:
+            data = json.loads(WINDOW_FILE.read_text())
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+    return []
+
+
+def save_window(tweets: list):
+    """Merge new tweets into window, deduplicate by id, prune to last 24h."""
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=24)
+
+    # Deduplicate by tweet id
+    seen_ids: set = set()
+    deduped: list = []
+    for t in tweets:
+        tid = str(t.get("id") or t.get("id_str") or "")
+        if tid and tid in seen_ids:
+            continue
+        if tid:
+            seen_ids.add(tid)
+
+        # Ensure created_at is present and timezone-aware
+        created_at = t.get("created_at", "")
+        if not created_at:
+            t = dict(t)  # don't mutate original
+            t["created_at"] = now.isoformat()
+            created_at = t["created_at"]
+
+        # Prune: keep only tweets within last 24h
+        try:
+            ts = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if ts < cutoff:
+                continue
+        except Exception:
+            pass  # If we can't parse timestamp, keep the tweet
+
+        deduped.append(t)
+
+    WINDOW_FILE.write_text(json.dumps(deduped, indent=2, ensure_ascii=False))
+    return len(deduped)
 
 
 def load_env():
@@ -143,6 +194,7 @@ def main():
 
     seen_ids: dict = state.get("seen_ids", {})
     new_tweets: list = []
+    all_window_tweets: list = []  # ALL fetched tweets for tweets_window.json
     errors: list = []
     stats: dict = {"accounts_checked": 0, "keywords_checked": 0, "total_fetched": 0}
 
@@ -165,7 +217,16 @@ def main():
         new_ids = []
         for tweet in tweets:
             tid = str(tweet.get("id") or tweet.get("id_str") or "")
-            if not tid or tid in seen:
+            if not tid:
+                continue
+
+            # Add ALL fetched tweets to window (regardless of seen status)
+            t_copy = dict(tweet)
+            normalize_tweet(t_copy, f"account:{username}", account.get("category", "general"),
+                            account.get("importance", "normal"), account.get("context", ""))
+            all_window_tweets.append(t_copy)
+
+            if tid in seen:
                 continue
             stats["total_fetched"] += 1
 
@@ -208,7 +269,16 @@ def main():
         new_ids = []
         for tweet in tweets:
             tid = str(tweet.get("id") or tweet.get("id_str") or "")
-            if not tid or tid in seen:
+            if not tid:
+                continue
+
+            # Add ALL fetched tweets to window (regardless of seen status)
+            t_copy = dict(tweet)
+            normalize_tweet(t_copy, f"keyword:{query}", kw.get("category", "keyword"),
+                            kw.get("importance", "high"), kw.get("context", ""))
+            all_window_tweets.append(t_copy)
+
+            if tid in seen:
                 continue
             stats["total_fetched"] += 1
 
@@ -227,7 +297,7 @@ def main():
         state["last_run"] = datetime.now(timezone.utc).isoformat()
         save_state(state)
 
-    # ── Save latest batch for summarizer ─────────────────────────────
+    # ── Save tweets to sliding window for summarizer ──────────────────
     output = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "stats": stats,
@@ -237,16 +307,12 @@ def main():
     }
 
     if not args.dry_run:
-        # Accumulate last 4h of tweets in a rolling buffer for summarizer
-        batch_file = SCRIPT_DIR / "latest_batch.json"
-        try:
-            existing = json.loads(batch_file.read_text()) if batch_file.exists() else []
-        except Exception:
-            existing = []
-        combined = existing + new_tweets
-        # Keep last 500 tweets max
-        batch_file.write_text(json.dumps(combined[-500:], ensure_ascii=False))
-    
+        # Merge all fetched tweets into the sliding 24h window
+        existing_window = load_window()
+        merged = existing_window + all_window_tweets
+        window_count = save_window(merged)
+        output["window_updated"] = window_count
+
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
 
