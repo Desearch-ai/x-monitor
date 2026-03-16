@@ -98,8 +98,8 @@ def load_env():
                 k, _, v = line.partition("=")
                 k = k.strip()
                 v = v.strip()
-                if k and k not in os.environ:
-                    os.environ[k] = v
+                if k:
+                    os.environ[k] = v  # always prefer .env over inherited shell env
 
 
 def load_config() -> dict:
@@ -173,12 +173,28 @@ def is_important_enough(tweet: dict, account_config: dict, global_filters: dict)
     return like_count >= min_likes or retweet_count >= 3
 
 
+def parse_twitter_date(s: str) -> str | None:
+    """Convert Twitter's 'Mon Mar 16 07:01:23 +0000 2026' to ISO 8601."""
+    try:
+        from datetime import datetime as _dt
+        dt = _dt.strptime(s, "%a %b %d %H:%M:%S %z %Y")
+        return dt.isoformat()
+    except Exception:
+        return None
+
+
 def normalize_tweet(tweet: dict, source: str, category: str, importance: str, context: str) -> dict:
-    """Add monitor metadata to a tweet dict."""
+    """Add monitor metadata to a tweet dict. Also converts created_at to ISO 8601."""
     tweet["_monitor_source"] = source
     tweet["_monitor_category"] = category
     tweet["_monitor_importance"] = importance
     tweet["_monitor_context"] = context
+    # Convert Twitter date format to ISO 8601 for window compatibility
+    ca = tweet.get("created_at", "")
+    if ca and not ca[0].isdigit():  # Twitter format starts with weekday name
+        iso = parse_twitter_date(ca)
+        if iso:
+            tweet["created_at"] = iso
     return tweet
 
 
