@@ -120,7 +120,7 @@ def call_openrouter(prompt: str) -> str:
         method="POST",
     )
 
-    with urlopen(req, timeout=25) as resp:
+    with urlopen(req, timeout=90) as resp:
         result = json.loads(resp.read().decode())
 
     return result["choices"][0]["message"]["content"].strip()
@@ -215,7 +215,8 @@ def main():
         summary = call_openrouter(prompt)
     except Exception as e:
         print(f"[ERROR] OpenRouter call failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        print("[SKIP] Exiting 0 so cron treats this as a skip, not a failure.")
+        sys.exit(0)
 
     # Strip any HTML tags (plain text for Discord)
     summary_clean = re.sub(r'<[^>]+>', '', summary)
