@@ -12,6 +12,7 @@ Usage:
     python3 summarize.py --hours 12       # summarize last 12h
     python3 summarize.py --dry-run        # print only, don't post to Discord
     python3 summarize.py --dry-run --hours 12
+    python3 summarize.py --dry-run --hours 12  # uses sample data if window empty
 """
 
 import argparse
@@ -34,6 +35,85 @@ MODEL = "google/gemma-3-4b-it:free"
 DESEARCH_KEYWORDS = [
     "desearch", "@desearch_ai", "#desearch",
     "sn22", "subnet22", "subnet 22",
+]
+
+# ---------------------------------------------------------------------------
+# Sample data — used as dry-run fallback when tweets_window.json is empty.
+# Ensures format verification works without live data.
+# ---------------------------------------------------------------------------
+SAMPLE_TWEETS = [
+    {
+        "id": "1001",
+        "user": {"username": "const", "name": "Jacob Steeves"},
+        "text": "Excited to announce Bittensor SN22 Desearch is hitting new milestones. "
+                "Real decentralised search is coming. #desearch @desearch_ai",
+        "like_count": 342,
+        "retweet_count": 87,
+        "url": "https://x.com/const/status/1001",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "bittensor",
+        "_monitor_source": "account",
+    },
+    {
+        "id": "1002",
+        "user": {"username": "desearch_ai", "name": "Desearch AI"},
+        "text": "SN22 search quality just levelled up — try it at desearch.ai. "
+                "We're now indexing 10B+ documents across the decentralised web. #sn22",
+        "like_count": 198,
+        "retweet_count": 54,
+        "url": "https://x.com/desearch_ai/status/1002",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "desearch",
+        "_monitor_source": "account",
+    },
+    {
+        "id": "1003",
+        "user": {"username": "SiamKidd", "name": "SiamKidd"},
+        "text": "Been using @desearch_ai for research lately. "
+                "Really impressive results vs centralised alternatives. subnet22 doing work.",
+        "like_count": 156,
+        "retweet_count": 31,
+        "url": "https://x.com/SiamKidd/status/1003",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "bittensor",
+        "_monitor_source": "account",
+    },
+    {
+        "id": "1004",
+        "user": {"username": "marclou", "name": "Marc Lou"},
+        "text": "The indie hacker playbook for 2025: ship fast, charge early, "
+                "don't raise VC. I went from 0 to $40k MRR in 14 months doing exactly this.",
+        "like_count": 2840,
+        "retweet_count": 312,
+        "url": "https://x.com/marclou/status/1004",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "influencer",
+        "_monitor_source": "account",
+    },
+    {
+        "id": "1005",
+        "user": {"username": "ExaAILabs", "name": "Exa AI"},
+        "text": "Exa's neural search now supports 50+ languages with sub-100ms latency. "
+                "Try our API free — 1000 queries/month.",
+        "like_count": 421,
+        "retweet_count": 89,
+        "url": "https://x.com/ExaAILabs/status/1005",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "competitor",
+        "_monitor_source": "account",
+    },
+    {
+        "id": "1006",
+        "user": {"username": "opentensor", "name": "OpenTensor Foundation"},
+        "text": "TAO staking rewards hit an all-time high this epoch. "
+                "The network is growing stronger with every subnet upgrade.",
+        "like_count": 893,
+        "retweet_count": 201,
+        "url": "https://x.com/opentensor/status/1006",
+        "created_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S+00:00"),
+        "_monitor_category": "bittensor",
+        "_monitor_source": "account",
+    },
 ]
 
 
@@ -107,7 +187,6 @@ def is_desearch_tweet(t: dict) -> bool:
 def tweet_url(t: dict) -> str:
     """Return a plain (non-angle-bracketed) URL for the tweet."""
     url = t.get("url", "") or ""
-    # Strip any accidental angle brackets
     url = url.strip("<>")
     if url.startswith("http"):
         return url
@@ -127,13 +206,12 @@ def trunc(text: str, max_len: int = 75) -> str:
 def get_opportunity(tweets: list) -> str:
     """
     Ask the LLM for ONE concrete action line based on what's trending.
-    Falls back to a static message if the API call fails.
+    Falls back to a static message if the API call fails or no key set.
     """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key or not tweets:
         return "No actionable signals detected this window."
 
-    # Feed top-10 by engagement as context
     top = sorted(tweets, key=engagement, reverse=True)[:10]
     context_lines = []
     for t in top:
@@ -171,7 +249,6 @@ def get_opportunity(tweets: list) -> str:
         with urlopen(req, timeout=20) as resp:
             result = json.loads(resp.read().decode())
         raw = result["choices"][0]["message"]["content"].strip()
-        # Ensure it's one line and not too long
         return raw.split("\n")[0][:130]
     except Exception as e:
         print(f"[WARN] LLM opportunity call failed: {e}", file=sys.stderr)
@@ -182,7 +259,7 @@ def get_opportunity(tweets: list) -> str:
 # Format builder
 # ---------------------------------------------------------------------------
 
-def build_summary(tweets: list, hours: int) -> str:
+def build_summary(tweets: list, hours: int, sample: bool = False) -> str:
     """
     Build the compact summary string.
     Target: max ~15 lines, plain URLs, scannable.
@@ -199,15 +276,17 @@ def build_summary(tweets: list, hours: int) -> str:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     lines = []
 
-    # ── Header (1 line) ────────────────────────────────────────────────────
-    lines.append(f"📡 X Monitor | {now} | {hours}h window | {len(tweets)} tweets")
+    # ── Header ────────────────────────────────────────────────────────────
+    sample_tag = " [SAMPLE DATA]" if sample else ""
+    lines.append(
+        f"📡 X Monitor{sample_tag} | {now} | {hours}h window | {len(tweets)} tweets"
+    )
     lines.append("")
 
     # ── Desearch Mentions ─────────────────────────────────────────────────
     lines.append("🔍 Desearch Mentions")
     desearch_tweets = [t for t in tweets if is_desearch_tweet(t)]
     if desearch_tweets:
-        # Sort by engagement, cap at 5
         for t in sorted(desearch_tweets, key=engagement, reverse=True)[:5]:
             user = (t.get("user") or {}).get("username", "unknown")
             text = trunc(t.get("text", ""), 70)
@@ -233,7 +312,10 @@ def build_summary(tweets: list, hours: int) -> str:
 
     # ── Opportunity ───────────────────────────────────────────────────────
     lines.append("💡 Opportunity")
-    lines.append(get_opportunity(tweets))
+    if sample:
+        lines.append("Reply to @const's Desearch milestone post to amplify SN22 visibility.")
+    else:
+        lines.append(get_opportunity(tweets))
 
     return "\n".join(lines)
 
@@ -290,19 +372,35 @@ def main():
     all_tweets = load_window()
     tweets = filter_by_hours(all_tweets, args.hours)
 
+    using_sample = False
     if not tweets:
-        print(f"No tweets in the last {args.hours}h window — nothing to summarize.")
-        print(f"(tweets_window.json has {len(all_tweets)} total tweets)")
-        return
+        if args.dry_run:
+            # Dry-run with no live data: fall back to sample tweets so format
+            # can be verified (e.g. by QA) without needing a populated window.
+            print(
+                f"[INFO] No tweets in last {args.hours}h "
+                f"(window total: {len(all_tweets)}) — using sample data for dry-run.",
+                file=sys.stderr,
+            )
+            tweets = SAMPLE_TWEETS
+            using_sample = True
+        else:
+            print(
+                f"No tweets in the last {args.hours}h window — nothing to summarize."
+            )
+            print(f"(tweets_window.json has {len(all_tweets)} total tweets)")
+            return
 
-    print(f"Building summary: {len(tweets)} tweets (last {args.hours}h) "
-          f"of {len(all_tweets)} in window…", file=sys.stderr)
+    print(
+        f"Building summary: {len(tweets)} tweets (last {args.hours}h)"
+        + (" [SAMPLE]" if using_sample else f" of {len(all_tweets)} in window") + "…",
+        file=sys.stderr,
+    )
 
-    summary = build_summary(tweets, args.hours)
+    summary = build_summary(tweets, args.hours, sample=using_sample)
     line_count = len(summary.splitlines())
     print(f"Output: {line_count} lines", file=sys.stderr)
 
-    # Always print to stdout
     print(summary)
 
     if not args.dry_run:
