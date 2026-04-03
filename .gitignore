@@ -2,3 +2,5 @@
 state.json
 __pycache__/
 *.pyc
+tweets_window.json
+latest_batch.json
