@@ -1,8 +1,15 @@
 #!/usr/bin/env node
 /**
  * X Monitor — Direct Discord poster (no LLM overhead)
- * Runs monitor.py, parses output, posts new tweets to Discord #x-alerts
- * Runtime: ~10-30s vs 180s+ with LLM agent
+ * Runs monitor.py, parses output, posts ONE grouped message to Discord #x-alerts
+ * Format:
+ *   🔔 X Monitor
+ *
+ *   brand
+ *   • @user1 ❤️6 — "tweet text..." [→](url)
+ *
+ *   bittensor
+ *   • @user3 ❤️5 — "tweet text..." [→](url)
  */
 
 const { execSync } = require('child_process')
@@ -12,6 +19,7 @@ const fs = require('fs')
 
 const DISCORD_CHANNEL = '1477727527618347340'
 const MONITOR_DIR = path.dirname(require.resolve('./monitor.py') || __filename)
+const MAX_TWEET_TEXT = 100
 
 // Read Discord token from DISCORD_BOT_TOKEN env var or openclaw.json (local fallback)
 function getDiscordToken() {
@@ -22,21 +30,6 @@ function getDiscordToken() {
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw/openclaw.json'), 'utf8'))
     return cfg.channels?.discord?.token
   } catch { return null }
-}
-
-// Category emoji map
-const CATEGORY_EMOJI = {
-  desearch: '🔍', brand: '🔍',
-  bittensor: '🦾',
-  competitor: '🏆',
-  influencer: '🤝',
-  system: '⚙️',
-  builder: '🏗️',
-  community: '👥',
-  ai: '🤖',
-  subnet: '#️⃣',
-  keyword: '#️⃣',
-  default: '📌'
 }
 
 function postToDiscord(token, channelId, message) {
@@ -66,7 +59,36 @@ function postToDiscord(token, channelId, message) {
   })
 }
 
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)) }
+/**
+ * Build a single Discord message for all tweets, grouped by category.
+ * Returns null if there are no tweets.
+ */
+function buildMessage(tweets) {
+  if (!tweets || tweets.length === 0) return null
+
+  // Group by _monitor_category (preserve insertion order)
+  const groups = new Map()
+  for (const t of tweets) {
+    const cat = (t._monitor_category || 'default').toLowerCase()
+    if (!groups.has(cat)) groups.set(cat, [])
+    groups.get(cat).push(t)
+  }
+
+  const sections = []
+  for (const [cat, catTweets] of groups) {
+    const lines = catTweets.map(t => {
+      const username = t.user?.username || t.user?.name || 'unknown'
+      let text = (t.text || '').replace(/\n/g, ' ').trim()
+      if (text.length > MAX_TWEET_TEXT) text = text.slice(0, MAX_TWEET_TEXT) + '...'
+      const likes = t.like_count || 0
+      const url = t.url || ''
+      return `• @${username} ❤️${likes} — "${text}" [→](${url})`
+    })
+    sections.push(`${cat}\n${lines.join('\n')}`)
+  }
+
+  return `🔔 X Monitor\n\n${sections.join('\n\n')}`
+}
 
 async function main() {
   const token = getDiscordToken()
@@ -98,36 +120,19 @@ async function main() {
     process.exit(0)
   }
 
-  // Batch tweets into groups of 5 per message
-  const BATCH_SIZE = 5
-  for (let i = 0; i < tweets.length; i += BATCH_SIZE) {
-    const batch = tweets.slice(i, i + BATCH_SIZE)
-    const lines = batch.map(t => {
-      const cat = (t._monitor_category || 'default').toLowerCase()
-      const emoji = CATEGORY_EMOJI[cat] || CATEGORY_EMOJI.default
-      const username = t.user?.username || t.user?.name || 'unknown'
-      const text = (t.text || '').slice(0, 200).replace(/\n/g, ' ')
-      const likes = t.like_count || 0
-      const rts = t.retweet_count || 0
-      const url = t.url || ''
-      const context = t._monitor_context || ''
-
-      let msg = `🔔 **X Monitor** | ${emoji} ${cat}\n@${username} · ❤️${likes} 🔄${rts}\n"${text}"\n🔗 <${url}>`
-      if (context) msg += `\n_${context}_`
-      return msg
-    })
-
-    const message = lines.join('\n\n')
-    try {
-      await postToDiscord(token, DISCORD_CHANNEL, message)
-      console.log(`Posted batch ${Math.floor(i/BATCH_SIZE)+1}`)
-      if (i + BATCH_SIZE < tweets.length) await sleep(1000) // rate limit
-    } catch (e) {
-      console.error('Discord post failed:', e.message)
-    }
+  const message = buildMessage(tweets)
+  if (!message) {
+    console.log('Nothing to post')
+    process.exit(0)
   }
 
-  console.log(`Done: ${tweets.length} tweets posted`)
+  try {
+    await postToDiscord(token, DISCORD_CHANNEL, message)
+    console.log(`Done: posted 1 message covering ${tweets.length} tweet(s)`)
+  } catch (e) {
+    console.error('Discord post failed:', e.message)
+    process.exit(1)
+  }
 }
 
 main().catch(e => { console.error(e); process.exit(1) })
