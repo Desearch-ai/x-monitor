@@ -66,7 +66,6 @@ def build_report(hours: int) -> str:
 
     # Group by source account
     by_account: dict = {}
-    by_category: dict = {}
 
     for t in tweets:
         source = t.get("_monitor_source", "unknown")
@@ -84,15 +83,12 @@ def build_report(hours: int) -> str:
         by_account[acct]["rt"] += t.get("retweet_count", 0) or 0
         by_account[acct]["tweets"].append(t)
 
-        cat = t.get("_monitor_category", "other")
-        by_category[cat] = by_category.get(cat, 0) + 1
-
     total = len(tweets)
-    now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
     lines = [
-        f"📊 **X Monitor — Daily Stats** | {now_str}",
-        f"📅 Last {hours}h | **{total} posts** across {len(by_account)} sources",
+        f"📊 **X Monitor — Daily Stats {date_str}**",
+        f"Last {hours}h: **{total} posts** across {len(by_account)} accounts",
         "",
     ]
 
@@ -103,28 +99,23 @@ def build_report(hours: int) -> str:
     # Sort by count descending
     sorted_accounts = sorted(by_account.items(), key=lambda x: x[1]["count"], reverse=True)
 
-    lines.append("**Posts by account:**")
+    lines.append("**By account:**")
     for acct, data in sorted_accounts:
-        bar = "█" * min(data["count"], 20)
         lines.append(
-            f"  `{acct:<22}` {data['count']:>3} posts | "
-            f"❤️ {data['likes']:>5} | 🔄 {data['rt']:>4}  {bar}"
+            f"  {acct:<22}  {data['count']:>3} posts  E:{data['likes']:>4}  RT:{data['rt']:>3}"
         )
 
     lines.append("")
 
-    # Category breakdown
-    if by_category:
-        lines.append("**By category:**")
-        for cat, cnt in sorted(by_category.items(), key=lambda x: x[1], reverse=True):
-            lines.append(f"  {cat}: {cnt}")
-        lines.append("")
-
-    # Top posts by engagement
-    top = sorted(tweets, key=lambda t: (t.get("like_count", 0) or 0) + (t.get("retweet_count", 0) or 0) * 2, reverse=True)[:5]
+    # Top 3 posts by engagement (likes + 2*retweets)
+    top = sorted(
+        tweets,
+        key=lambda t: (t.get("like_count", 0) or 0) + (t.get("retweet_count", 0) or 0) * 2,
+        reverse=True,
+    )[:3]
     if top:
-        lines.append("**🔥 Top posts (by engagement):**")
-        for t in top:
+        lines.append("**🔥 Top 3 Posts:**")
+        for i, t in enumerate(top, 1):
             username = ""
             u = t.get("user", {})
             if isinstance(u, dict):
@@ -133,12 +124,11 @@ def build_report(hours: int) -> str:
             if src.startswith("account:"):
                 username = src.replace("account:", "@")
             likes = t.get("like_count", 0) or 0
-            rts = t.get("retweet_count", 0) or 0
-            text = (t.get("text") or "")[:100].replace("\n", " ")
+            text = (t.get("text") or "")[:120].replace("\n", " ")
             url = t.get("url", "")
-            lines.append(f"  {username} ❤️{likes} 🔄{rts} — {text}")
+            lines.append(f"{i}. {username} ({likes} likes) — {text}")
             if url:
-                lines.append(f"    <{url}>")
+                lines.append(f"   {url}")
 
     return "\n".join(lines)
 
