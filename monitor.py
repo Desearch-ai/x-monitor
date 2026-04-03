@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).parent
 STATE_FILE = SCRIPT_DIR / "state.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
+PENDING_ALERTS_FILE = SCRIPT_DIR / "pending_alerts.json"
 DESEARCH_SCRIPT = Path.home() / ".openclaw/workspace/skills/desearch-x-search/scripts/desearch.py"
 
 
@@ -328,6 +329,9 @@ def main():
         merged = existing_window + all_window_tweets
         window_count = save_window(merged)
         output["window_updated"] = window_count
+
+        # Write new tweets to pending_alerts.json for post-to-discord.cjs to consume
+        PENDING_ALERTS_FILE.write_text(json.dumps(new_tweets, indent=2, ensure_ascii=False))
 
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
