@@ -82,7 +82,7 @@ function buildMessage(tweets) {
       if (text.length > MAX_TWEET_TEXT) text = text.slice(0, MAX_TWEET_TEXT) + '...'
       const likes = t.like_count || 0
       const url = t.url || ''
-      return `• @${username} ❤️${likes} — "${text}" [→](${url})`
+      return `• @${username} ❤️${likes} — "${text}" [→](<${url}>)`
     })
     sections.push(`${cat}\n${lines.join('\n')}`)
   }
