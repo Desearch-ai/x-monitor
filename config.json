@@ -30,23 +30,23 @@
     },
     {
       "username": "markjeffrey",
-      "category": "content",
+      "category": "bittensor",
       "importance": "high",
-      "context": "YouTuber - content creator",
+      "context": "Bittensor Fund partner & influencer - tracks TAO ecosystem, subnets, and decentralized AI",
       "include_retweets": false
     },
     {
       "username": "openclaw",
-      "category": "system",
+      "category": "openclaw",
       "importance": "high",
       "context": "OpenClaw - the platform our assistant system is built on",
       "include_retweets": false
     },
     {
       "username": "numinous_ai",
-      "category": "ai",
+      "category": "subnet",
       "importance": "high",
-      "context": "AI account to monitor",
+      "context": "Partner subnet on Bittensor - track all activity",
       "include_retweets": false
     },
     {
@@ -93,7 +93,7 @@
     },
     {
       "username": "steipete",
-      "category": "system",
+      "category": "openclaw",
       "importance": "high",
       "context": "Founder of OpenClaw — our assistant platform. All posts important, especially product updates",
       "include_retweets": false
@@ -116,13 +116,13 @@
   "keywords": [
     {
       "query": "#desearch",
-      "category": "brand",
+      "category": "desearch",
       "importance": "high",
       "context": "Our brand hashtag - all mentions important"
     },
     {
       "query": "@desearch_ai",
-      "category": "brand",
+      "category": "desearch",
       "importance": "high",
       "context": "Direct mentions of our X account"
     },
