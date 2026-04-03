@@ -21,6 +21,8 @@ from pathlib import Path
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
+import requests
+
 SCRIPT_DIR = Path(__file__).parent
 WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
@@ -97,32 +99,36 @@ def format_tweets_for_llm(tweets: list) -> str:
 
 
 def call_openrouter(prompt: str) -> str:
+    """Call OpenRouter API using requests.post with a hard 90s timeout.
+
+    Using requests instead of urllib for cleaner timeout + exception handling.
+    timeout=90 covers both connect and read — free-tier models can be slow.
+    """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
 
-    body = json.dumps({
+    payload = {
         "model": MODEL,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 1500,
         "temperature": 0.4,
-    }).encode()
+    }
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://desearch.ai",
+        "X-Title": "Desearch X Monitor",
+    }
 
-    req = Request(
+    resp = requests.post(
         OPENROUTER_API,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://desearch.ai",
-            "X-Title": "Desearch X Monitor",
-        },
-        method="POST",
+        json=payload,
+        headers=headers,
+        timeout=90,
     )
-
-    with urlopen(req, timeout=90) as resp:
-        result = json.loads(resp.read().decode())
-
+    resp.raise_for_status()
+    result = resp.json()
     return result["choices"][0]["message"]["content"].strip()
 
 
@@ -213,10 +219,17 @@ def main():
 
     try:
         summary = call_openrouter(prompt)
-    except Exception as e:
-        print(f"[ERROR] OpenRouter call failed: {e}", file=sys.stderr)
+    except requests.exceptions.Timeout:
+        print("[ERROR] OpenRouter timed out after 90s — skipping summary.", file=sys.stderr)
         print("[SKIP] Exiting 0 so cron treats this as a skip, not a failure.")
         sys.exit(0)
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] OpenRouter request failed: {e}", file=sys.stderr)
+        print("[SKIP] Exiting 0 so cron treats this as a skip, not a failure.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"[ERROR] Unexpected error calling OpenRouter: {e}", file=sys.stderr)
+        sys.exit(1)
 
     # Strip any HTML tags (plain text for Discord)
     summary_clean = re.sub(r'<[^>]+>', '', summary)
