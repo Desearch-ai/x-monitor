@@ -98,29 +98,45 @@ def format_tweets_for_llm(tweets: list) -> str:
 
 
 def call_openrouter(prompt: str) -> str:
-    """Use requests.post with hard 90s timeout — urlopen timeout=25 resets on any byte, hangs indefinitely."""
+    """Use requests.post with hard 90s wall-clock timeout.
+
+    Why requests instead of urllib.urlopen:
+      urlopen(timeout=N) resets on *any* received byte — a streaming LLM response
+      that trickles bytes can hang indefinitely.  requests.post(timeout=N) enforces
+      a hard wall-clock limit on the entire operation.
+    """
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
 
-    resp = requests.post(
-        OPENROUTER_API,
-        json={
-            "model": MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 1500,
-            "temperature": 0.4,
-        },
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://desearch.ai",
-            "X-Title": "Desearch X Monitor",
-        },
-        timeout=90,
-    )
+    try:
+        resp = requests.post(
+            OPENROUTER_API,
+            json={
+                "model": MODEL,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": 1500,
+                "temperature": 0.4,
+            },
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://desearch.ai",
+                "X-Title": "Desearch X Monitor",
+            },
+            timeout=90,
+        )
+    except requests.exceptions.Timeout:
+        raise RuntimeError("OpenRouter timed out after 90s — model may be overloaded")
+    except requests.exceptions.RequestException as e:
+        raise RuntimeError(f"OpenRouter request failed: {e}")
+
     resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"].strip()
+    data = resp.json()
+    choices = data.get("choices") or []
+    if not choices:
+        raise RuntimeError(f"OpenRouter returned empty choices (free-tier rate limit?): {data}")
+    return choices[0]["message"]["content"].strip()
 
 
 def send_discord(text: str, channel_id: str) -> bool:
