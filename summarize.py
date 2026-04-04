@@ -18,6 +18,7 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import requests
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -97,33 +98,29 @@ def format_tweets_for_llm(tweets: list) -> str:
 
 
 def call_openrouter(prompt: str) -> str:
+    """Use requests.post with hard 90s timeout — urlopen timeout=25 resets on any byte, hangs indefinitely."""
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
 
-    body = json.dumps({
-        "model": MODEL,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 1500,
-        "temperature": 0.4,
-    }).encode()
-
-    req = Request(
+    resp = requests.post(
         OPENROUTER_API,
-        data=body,
+        json={
+            "model": MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 1500,
+            "temperature": 0.4,
+        },
         headers={
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://desearch.ai",
             "X-Title": "Desearch X Monitor",
         },
-        method="POST",
+        timeout=90,
     )
-
-    with urlopen(req, timeout=25) as resp:
-        result = json.loads(resp.read().decode())
-
-    return result["choices"][0]["message"]["content"].strip()
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
 
 
 def send_discord(text: str, channel_id: str) -> bool:
