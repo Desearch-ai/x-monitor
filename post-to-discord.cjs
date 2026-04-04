@@ -12,13 +12,13 @@
  *   • @user3 ❤️5 — "tweet text..." [→](url)
  */
 
-const { execSync } = require('child_process')
 const https = require('https')
 const path = require('path')
 const fs = require('fs')
 
 const DISCORD_CHANNEL = '1477727527618347340'
-const MONITOR_DIR = path.dirname(require.resolve('./monitor.py') || __filename)
+const MONITOR_DIR = path.dirname(__filename)
+const PENDING_ALERTS_FILE = path.join(MONITOR_DIR, 'pending_alerts.json')
 const MAX_TWEET_TEXT = 100
 
 // Read Discord token from DISCORD_BOT_TOKEN env var or openclaw.json (local fallback)
@@ -82,7 +82,7 @@ function buildMessage(tweets) {
       if (text.length > MAX_TWEET_TEXT) text = text.slice(0, MAX_TWEET_TEXT) + '...'
       const likes = t.like_count || 0
       const url = t.url || ''
-      return `• @${username} ❤️${likes} — "${text}" [→](${url})`
+      return `• @${username} ❤️${likes} — "${text}" [→](<${url}>)`
     })
     sections.push(`${cat}\n${lines.join('\n')}`)
   }
@@ -94,29 +94,26 @@ async function main() {
   const token = getDiscordToken()
   if (!token) { console.error('No Discord token found'); process.exit(1) }
 
-  // Run monitor.py
-  console.log('Running monitor.py...')
-  let monitorOutput
+  // Read pending_alerts.json written by monitor.py
+  let tweets = []
+  if (!fs.existsSync(PENDING_ALERTS_FILE)) {
+    console.log('pending_alerts.json not found — nothing to post')
+    process.exit(0)
+  }
+
   try {
-    monitorOutput = execSync(
-      `cd ${MONITOR_DIR} && python3 monitor.py 2>/dev/null`,
-      { timeout: 120000, encoding: 'utf8' }
-    )
+    const raw = fs.readFileSync(PENDING_ALERTS_FILE, 'utf8')
+    tweets = JSON.parse(raw)
+    if (!Array.isArray(tweets)) tweets = []
   } catch (e) {
-    console.error('monitor.py failed:', e.message)
-    await postToDiscord(token, DISCORD_CHANNEL, `⚠️ X Monitor error: ${e.message.slice(0, 200)}`)
+    console.error('Failed to parse pending_alerts.json:', e.message)
     process.exit(1)
   }
 
-  let data
-  try { data = JSON.parse(monitorOutput) }
-  catch { console.error('monitor.py output not JSON'); process.exit(1) }
-
-  const tweets = data.new_tweets || []
-  console.log(`New tweets: ${tweets.length}`)
+  console.log(`Pending alerts: ${tweets.length}`)
 
   if (tweets.length === 0) {
-    console.log('No new tweets — silent exit')
+    console.log('No pending alerts — silent exit')
     process.exit(0)
   }
 
@@ -129,6 +126,9 @@ async function main() {
   try {
     await postToDiscord(token, DISCORD_CHANNEL, message)
     console.log(`Done: posted 1 message covering ${tweets.length} tweet(s)`)
+    // Clear pending alerts after successful post
+    fs.writeFileSync(PENDING_ALERTS_FILE, '[]', 'utf8')
+    console.log('Cleared pending_alerts.json')
   } catch (e) {
     console.error('Discord post failed:', e.message)
     process.exit(1)

@@ -134,11 +134,12 @@ def build_report(hours: int) -> str:
                 username = src.replace("account:", "@")
             likes = t.get("like_count", 0) or 0
             rts = t.get("retweet_count", 0) or 0
-            text = (t.get("text") or "")[:100].replace("\n", " ")
+            text = (t.get("text") or "").replace("\n", " ").strip()
+            if len(text) > 80:
+                text = text[:80] + "..."
             url = t.get("url", "")
-            lines.append(f"  {username} ❤️{likes} 🔄{rts} — {text}")
-            if url:
-                lines.append(f"    <{url}>")
+            link = f" [→](<{url}>)" if url else ""
+            lines.append(f"• {username} ❤️{likes} 🔄{rts} — \"{text}\"{link}")
 
     return "\n".join(lines)
 
