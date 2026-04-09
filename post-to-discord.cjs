@@ -223,4 +223,12 @@ async function main() {
   console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
 }
 
-main().catch(e => { console.error(e); process.exit(1) })
+module.exports = {
+  buildChunks,
+  tweetLine,
+  getChannelId,
+}
+
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1) })
+}

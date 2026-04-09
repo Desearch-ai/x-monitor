@@ -80,15 +80,16 @@ python3 monitor.py
 # 3. Inspect queued alerts after monitor run
 cat pending_alerts.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} alert(s) queued')"
 
-# 4. Post queued alerts to Discord (dry-run: inspect chunks without sending)
-node -e "
-const {buildChunks} = require('./post-to-discord.cjs');
-" 2>/dev/null || node post-to-discord.cjs --help 2>/dev/null; \
-node -e "
+# 4. Dry-run the chunk builder without sending anything
+node - <<'NODE'
 const fs = require('fs');
-const tweets = JSON.parse(fs.readFileSync('pending_alerts.json','utf8'));
+const { buildChunks } = require('./post-to-discord.cjs');
+const tweets = JSON.parse(fs.readFileSync('pending_alerts.json', 'utf8'));
+const chunks = buildChunks(tweets);
 console.log('tweets:', tweets.length);
-" 2>/dev/null
+console.log('chunks:', chunks.length);
+console.log('chunk lengths:', chunks.map(c => c.length));
+NODE
 
 # 5. Post for real — verify chunk count, char lengths, and final clear
 node post-to-discord.cjs
