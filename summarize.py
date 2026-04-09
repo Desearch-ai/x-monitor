@@ -19,8 +19,6 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import requests
-from urllib.error import HTTPError
-from urllib.request import Request, urlopen
 
 SCRIPT_DIR = Path(__file__).parent
 WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
@@ -149,28 +147,32 @@ def send_discord(text: str, channel_id: str) -> bool:
     if len(text) > 1990:
         text = text[:1990] + "\n…"
 
-    body = json.dumps({
-        "content": text,
-    }).encode()
-
-    req = Request(
-        f"https://discord.com/api/v10/channels/{channel_id}/messages",
-        data=body,
-        headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
     try:
-        with urlopen(req, timeout=15) as resp:
-            result = json.loads(resp.read().decode())
-        return "id" in result
-    except HTTPError as e:
-        err = e.read().decode()
-        print(f"[ERROR] Discord: {err}", file=sys.stderr)
+        resp = requests.post(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            json={"content": text},
+            headers={
+                "Authorization": f"Bot {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=15,
+        )
+    except requests.exceptions.RequestException as e:
+        print(f"[ERROR] Discord request failed: {e}", file=sys.stderr)
         return False
+
+    if resp.status_code >= 400:
+        hint = ""
+        if resp.status_code == 401:
+            hint = " (bad token — check DISCORD_BOT_TOKEN)"
+        elif resp.status_code == 403:
+            hint = " (forbidden — bot lacks Send Messages permission)"
+        elif resp.status_code == 404:
+            hint = " (channel not found — check discord.alerts_channel in config.json)"
+        print(f"[ERROR] Discord HTTP {resp.status_code}{hint}: {resp.text}", file=sys.stderr)
+        return False
+
+    return "id" in resp.json()
 
 
 SYSTEM_PROMPT = """You are a sharp analyst for Desearch AI — a Bittensor Subnet 22 search product.
@@ -238,8 +240,8 @@ def main():
     print(full_message)
 
     if not args.dry_run:
-        # Post to Discord #x-alerts
-        discord_channel = config.get("discord_channel_id", "1477727527618347340")
+        # Post to Discord #x-alerts (channel from config.json discord.alerts_channel)
+        discord_channel = str(config["discord"]["alerts_channel"])
         ok = send_discord(full_message, discord_channel)
         if ok:
             print("Posted to Discord.", file=sys.stderr)

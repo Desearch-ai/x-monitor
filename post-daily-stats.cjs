@@ -8,13 +8,27 @@ const https = require('https')
 const fs = require('fs')
 const path = require('path')
 
-const DISCORD_CHANNEL = '1477727527618347340'
 const HOURS = process.argv[2] || '24'
 const SCRIPT_DIR = path.dirname(__filename)
+const CONFIG_FILE = path.join(SCRIPT_DIR, 'config.json')
 
 function getDiscordToken() {
-  const cfg = JSON.parse(fs.readFileSync('/Users/giga/.openclaw/openclaw.json', 'utf8'))
-  return cfg.channels?.discord?.token
+  if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN
+  try {
+    const home = process.env.HOME || process.env.USERPROFILE || ''
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw/openclaw.json'), 'utf8'))
+    return cfg.channels?.discord?.token
+  } catch { return null }
+}
+
+function getChannelId() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+    return String(cfg.discord?.alerts_channel || '')
+  } catch (e) {
+    console.error('Failed to read config.json:', e.message)
+    return ''
+  }
 }
 
 function postToDiscord(token, channelId, message) {
@@ -36,8 +50,13 @@ function postToDiscord(token, channelId, message) {
       let data = ''
       res.on('data', d => data += d)
       res.on('end', () => {
-        if (res.statusCode >= 400) reject(new Error(`Discord ${res.statusCode}: ${data}`))
-        else resolve()
+        if (res.statusCode >= 400) {
+          let hint = ''
+          if (res.statusCode === 401) hint = ' (bad token — check DISCORD_BOT_TOKEN or openclaw.json)'
+          else if (res.statusCode === 403) hint = ' (forbidden — bot lacks Send Messages permission)'
+          else if (res.statusCode === 404) hint = ' (channel not found — check discord.alerts_channel in config.json)'
+          reject(new Error(`Discord HTTP ${res.statusCode}${hint}: ${data}`))
+        } else resolve()
       })
     })
     req.on('error', reject)
@@ -48,7 +67,17 @@ function postToDiscord(token, channelId, message) {
 
 async function main() {
   const token = getDiscordToken()
-  if (!token) { console.error('No Discord token'); process.exit(1) }
+  if (!token) {
+    console.error('ERROR: No Discord token — set DISCORD_BOT_TOKEN env var or configure ~/.openclaw/openclaw.json')
+    process.exit(1)
+  }
+
+  const channelId = getChannelId()
+  if (!channelId) {
+    console.error('ERROR: No Discord channel configured — set discord.alerts_channel in config.json')
+    process.exit(1)
+  }
+  console.log(`Discord channel: ${channelId}`)
 
   let output
   try {
@@ -66,7 +95,7 @@ async function main() {
     process.exit(0)
   }
 
-  await postToDiscord(token, DISCORD_CHANNEL, output)
+  await postToDiscord(token, channelId, output)
   console.log('Posted daily stats')
 }
 

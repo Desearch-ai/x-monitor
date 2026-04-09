@@ -330,7 +330,10 @@ def main():
         window_count = save_window(merged)
         output["window_updated"] = window_count
 
-        # Write new tweets to pending_alerts.json for post-to-discord.cjs to consume
+        # Write new tweets to pending_alerts.json for post-to-discord.cjs to consume.
+        # Intentional overwrite (not append): each monitor run replaces the queue.
+        # If the previous run's alerts were not yet posted, they are superseded here.
+        # post-to-discord.cjs clears the file only after all chunks are confirmed sent.
         PENDING_ALERTS_FILE.write_text(json.dumps(new_tweets, indent=2, ensure_ascii=False))
 
     print(json.dumps(output, indent=2, ensure_ascii=False))

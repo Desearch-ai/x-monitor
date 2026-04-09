@@ -66,7 +66,72 @@ DESEARCH_API_KEY=xxx uv run python monitor.py --dry-run
 
 `--dry-run` won't save state, so you can test repeatedly.
 
-### 4. Enable cron job
+### 4. Manual end-to-end verification
+
+Run each step and check the output:
+
+```bash
+# 1. Check what's currently queued
+cat pending_alerts.json | python3 -m json.tool | head -30
+
+# 2. Run the monitor (real run — writes pending_alerts.json)
+python3 monitor.py
+
+# 3. Inspect queued alerts after monitor run
+cat pending_alerts.json | python3 -c "import sys,json; d=json.load(sys.stdin); print(f'{len(d)} alert(s) queued')"
+
+# 4. Post queued alerts to Discord (dry-run: inspect chunks without sending)
+node -e "
+const {buildChunks} = require('./post-to-discord.cjs');
+" 2>/dev/null || node post-to-discord.cjs --help 2>/dev/null; \
+node -e "
+const fs = require('fs');
+const tweets = JSON.parse(fs.readFileSync('pending_alerts.json','utf8'));
+console.log('tweets:', tweets.length);
+" 2>/dev/null
+
+# 5. Post for real — verify chunk count, char lengths, and final clear
+node post-to-discord.cjs
+
+# 6. Confirm pending_alerts.json was cleared
+cat pending_alerts.json
+# Expected: []
+```
+
+Key log lines to look for in `node post-to-discord.cjs` output:
+- `Discord channel: 1477727527618347340` — confirms channel read from config.json
+- `Pending alerts: N` — how many tweets were queued
+- `Built N Discord chunk(s) from M tweet(s)` — confirms splitting happened
+- `Posting chunk 1/N (XXXX chars)` — each chunk size (must be ≤ 2000)
+- `Done: N message(s) posted, pending_alerts.json cleared` — success
+
+### 5. Manual verification — summarize flow
+
+```bash
+# 1. Dry-run: prints the summary, does NOT post to Discord
+python3 summarize.py --dry-run
+
+# With a wider time window (last 24h):
+python3 summarize.py --dry-run --hours 24
+
+# 2. Post the summary for real (reads discord.alerts_channel from config.json)
+python3 summarize.py
+
+# Expected output:
+#   Summarizing N tweets from last 4h (window total: M)...  ← stderr
+#   📡 **X Monitor Summary** — YYYY-MM-DD HH:MM UTC         ← stdout (full message)
+#   📊 N tweets (last 4h)
+#   ...
+#   Posted to Discord.  ← stderr on success
+
+# 3. Run via the Node wrapper (cron uses this)
+node run-summarizer.cjs
+# Expected output:
+#   Summarizer done
+#   <last 5 lines of summarize.py output including "Posted to Discord.">
+```
+
+### 6. Enable cron job
 
 Once working, enable the cron in OpenClaw:
 - Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366`
