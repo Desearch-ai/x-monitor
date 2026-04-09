@@ -51,6 +51,17 @@ def load_window() -> list:
     return []
 
 
+def load_pending_alerts() -> list:
+    """Load queued alerts waiting for Discord delivery."""
+    if PENDING_ALERTS_FILE.exists():
+        try:
+            data = json.loads(PENDING_ALERTS_FILE.read_text())
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+    return []
+
+
 def save_window(tweets: list):
     """Merge new tweets into window, deduplicate by id, prune to last 24h."""
     now = datetime.now(timezone.utc)
@@ -330,11 +341,23 @@ def main():
         window_count = save_window(merged)
         output["window_updated"] = window_count
 
-        # Write new tweets to pending_alerts.json for post-to-discord.cjs to consume.
-        # Intentional overwrite (not append): each monitor run replaces the queue.
-        # If the previous run's alerts were not yet posted, they are superseded here.
+        # Merge newly fetched alerts into the pending Discord queue.
+        # This preserves unsent alerts across monitor runs if Discord delivery failed.
         # post-to-discord.cjs clears the file only after all chunks are confirmed sent.
-        PENDING_ALERTS_FILE.write_text(json.dumps(new_tweets, indent=2, ensure_ascii=False))
+        queued_alerts = load_pending_alerts()
+        merged_alerts = queued_alerts + new_tweets
+        deduped_alerts: list = []
+        seen_pending_ids: set[str] = set()
+        for tweet in merged_alerts:
+            tid = str(tweet.get("id") or tweet.get("id_str") or "")
+            dedupe_key = tid or json.dumps(tweet, sort_keys=True, ensure_ascii=False)
+            if dedupe_key in seen_pending_ids:
+                continue
+            seen_pending_ids.add(dedupe_key)
+            deduped_alerts.append(tweet)
+
+        PENDING_ALERTS_FILE.write_text(json.dumps(deduped_alerts, indent=2, ensure_ascii=False))
+        output["pending_alerts"] = len(deduped_alerts)
 
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
