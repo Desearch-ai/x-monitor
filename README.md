@@ -132,7 +132,39 @@ node run-summarizer.cjs
 #   <last 5 lines of summarize.py output including "Posted to Discord.">
 ```
 
-### 6. Enable cron job
+### 6. Run automated verification tests
+
+Two targeted test scripts ship with the repo to prove the key fixes are working.
+
+**Node — chunker / Discord safety:**
+```bash
+node test-chunker.cjs
+# Tests: 17 | Passed: 17 | Failed: 0
+# RESULT: PASS
+```
+What it verifies:
+- Empty / null input returns 0 chunks
+- Single tweet produces one ≤ 2000-char chunk with the `🔔 X Monitor` header
+- 30 tweets split into multiple chunks, every chunk ≤ 2000 chars
+- Every tweet `@-mention` appears in at least one chunk (full coverage)
+- 50-tweet, 2-category payload produces only ≤ 2000-char chunks
+- Category labels survive chunk boundaries
+- `tweetLine()` truncates text above the 100-char cap
+
+**Python — config-key consistency / pending-alerts semantics:**
+```bash
+python3 test-verify-config.py
+# Tests: 15 | Passed: 15 | Failed: 0
+# RESULT: PASS
+```
+What it verifies:
+- `config.json` has the correct nested `discord.alerts_channel` key
+- No stale top-level `discord_channel` / `discord_channel_id` key exists
+- `summarize.py` reads `config["discord"]["alerts_channel"]` (not any stale key)
+- `post-to-discord.cjs` reads `cfg.discord?.alerts_channel`
+- Failure-preservation log and success-clear log are both present in `post-to-discord.cjs`
+
+### 7. Enable cron job
 
 Once working, enable the cron in OpenClaw:
 - Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366`
