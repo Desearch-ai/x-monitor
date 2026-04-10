@@ -2,8 +2,9 @@
 /**
  * X Monitor — Direct Discord poster (no LLM overhead)
  * Reads pending_alerts.json, splits into Discord-safe chunks, posts to #x-alerts.
- * Chunks preserve category grouping. pending_alerts.json is updated after each
- * successful chunk so retries only resend remaining alerts.
+ * Chunks preserve category grouping. pending_alerts.json is only cleared after ALL
+ * chunks succeed. Sent tweet URLs are tracked in pending_alerts.sent.json so retries
+ * never re-post already-sent chunks without needing to modify the main queue file.
  * Format (first chunk):
  *   🔔 X Monitor
  *
@@ -20,6 +21,7 @@ const fs = require('fs')
 
 const MONITOR_DIR = path.dirname(__filename)
 const PENDING_ALERTS_FILE = path.join(MONITOR_DIR, 'pending_alerts.json')
+const SENT_TRACKING_FILE = path.join(MONITOR_DIR, 'pending_alerts.sent.json')
 const CONFIG_FILE = path.join(MONITOR_DIR, 'config.json')
 const MAX_TWEET_TEXT = 100
 const DISCORD_MAX_LEN = 2000
@@ -27,7 +29,6 @@ const DISCORD_MAX_LEN = 2000
 // Read Discord token from DISCORD_BOT_TOKEN env var or openclaw.json (local fallback)
 function getDiscordToken() {
   if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN
-  // Local OpenClaw fallback (not needed when using env var)
   try {
     const home = process.env.HOME || process.env.USERPROFILE || ''
     const cfg = JSON.parse(fs.readFileSync(path.join(home, '.openclaw/openclaw.json'), 'utf8'))
@@ -98,8 +99,7 @@ function tweetLine(t) {
  * - First chunk is prefixed with "🔔 X Monitor".
  * - Category grouping is preserved; large categories split across chunks with the
  *   category header repeated at the start of the continuation chunk.
- * - Returns {text, tweets}[] so main() can remove each chunk's tweets from
- *   pending_alerts.json immediately after each successful post (incremental update).
+ * - Returns {text, tweets}[] so main() can track which tweets belong to each chunk.
  */
 function buildChunks(tweets) {
   if (!tweets || tweets.length === 0) return []
@@ -119,7 +119,6 @@ function buildChunks(tweets) {
   let buf = HEADER  // first chunk always starts with the header
   let chunkTweets = []
 
-  // Append sep+text to buf if it fits; return true on success, false otherwise.
   function tryAppend(sep, text, tweet) {
     const candidate = buf === '' ? text : buf + sep + text
     if (candidate.length <= MAX) {
@@ -143,26 +142,20 @@ function buildChunks(tweets) {
       const line = tweetLine(tweet)
 
       if (!catHeaderInBuf) {
-        // First time we encounter this category in the current chunk.
-        // Try to add "catName\nline" as a block (joined to current content with \n\n).
         const catLine = `${cat}\n${line}`
         if (tryAppend('\n\n', catLine, tweet)) {
           catHeaderInBuf = true
         } else {
-          // Doesn't fit — flush and open a new chunk with this category block.
           flush()
           buf = catLine
           chunkTweets = [tweet]
           catHeaderInBuf = true
         }
       } else {
-        // Category header is already in the current chunk; add the line with \n.
         if (!tryAppend('\n', line, tweet)) {
-          // Doesn't fit — flush and continue the category in a new chunk.
           flush()
           buf = `${cat}\n${line}`
           chunkTweets = [tweet]
-          // catHeaderInBuf stays true: the category header is re-added above.
         }
       }
     }
@@ -186,7 +179,6 @@ async function main() {
   }
   console.log(`Discord channel: ${channelId}`)
 
-  // Read pending_alerts.json written by monitor.py
   if (!fs.existsSync(PENDING_ALERTS_FILE)) {
     console.log('pending_alerts.json not found — nothing to post')
     process.exit(0)
@@ -209,28 +201,43 @@ async function main() {
     process.exit(0)
   }
 
-  const chunks = buildChunks(tweets)
-  console.log(`Built ${chunks.length} Discord chunk(s) from ${tweets.length} tweet(s)`)
+  // Load sent-tweet tracking file from any previous partial run.
+  // pending_alerts.json is never modified mid-run; only the tracking file is updated.
+  // On retry, chunk 1 tweets are filtered out via the tracking file — no re-posts.
+  let sentUrls = new Set()
+  if (fs.existsSync(SENT_TRACKING_FILE)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(SENT_TRACKING_FILE, 'utf8'))
+      if (Array.isArray(raw)) sentUrls = new Set(raw)
+    } catch { /* ignore corrupt tracking file */ }
+  }
 
-  // Post chunks one at a time. After each success, remove that chunk's tweets from
-  // pending_alerts.json so a retry only resends what hasn't been posted yet.
-  let remaining = [...tweets]
+  const unsentTweets = tweets.filter(t => !sentUrls.has(t.url))
+  if (unsentTweets.length < tweets.length) {
+    console.log(`Resuming after partial failure — ${tweets.length - unsentTweets.length} tweet(s) already sent, ${unsentTweets.length} remaining`)
+  }
+
+  const chunks = buildChunks(unsentTweets)
+  console.log(`Built ${chunks.length} Discord chunk(s) from ${unsentTweets.length} tweet(s)`)
+
   for (let i = 0; i < chunks.length; i++) {
     const { text, tweets: chunkTweets } = chunks[i]
     console.log(`Posting chunk ${i + 1}/${chunks.length} (${text.length} chars, ${chunkTweets.length} tweet(s))`)
     try {
       await postToDiscord(token, channelId, text)
-      const sentUrls = new Set(chunkTweets.map(t => t.url))
-      remaining = remaining.filter(t => !sentUrls.has(t.url))
-      fs.writeFileSync(PENDING_ALERTS_FILE, JSON.stringify(remaining), 'utf8')
-      console.log(`  chunk ${i + 1} OK — ${remaining.length} alert(s) still pending`)
+      for (const t of chunkTweets) sentUrls.add(t.url)
+      fs.writeFileSync(SENT_TRACKING_FILE, JSON.stringify([...sentUrls]), 'utf8')
+      console.log(`  chunk ${i + 1} OK — ${tweets.length - sentUrls.size} alert(s) still pending`)
     } catch (e) {
       console.error(`Discord post failed on chunk ${i + 1}/${chunks.length}: ${e.message}`)
-      console.error(`pending_alerts.json updated — ${remaining.length} alert(s) still pending, retry to continue`)
+      console.error(`pending_alerts.json preserved — ${tweets.length - sentUrls.size} alert(s) still unsent, retry to continue`)
       process.exit(1)
     }
   }
 
+  // All chunks confirmed sent — clear queue and tracking file
+  fs.writeFileSync(PENDING_ALERTS_FILE, '[]', 'utf8')
+  if (fs.existsSync(SENT_TRACKING_FILE)) fs.unlinkSync(SENT_TRACKING_FILE)
   console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
 }
 
@@ -238,6 +245,7 @@ module.exports = {
   buildChunks,
   tweetLine,
   getChannelId,
+  SENT_TRACKING_FILE,
 }
 
 if (require.main === module) {

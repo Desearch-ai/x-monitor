@@ -139,20 +139,21 @@ node run-summarizer.cjs
 $ node --test tests/test_post_to_discord.cjs
 TAP version 13
 ok 1 - buildChunks returns {text, tweets} pairs and splits oversized batches into Discord-safe chunks
-ok 2 - partial failure: chunk 1 tweets removed from queue, chunk 2 tweets preserved for retry
-ok 3 - idempotent retry — on retry, only unsent tweets are posted; chunk 1 not re-sent
+ok 2 - partial failure preserves queue: pending_alerts.json unchanged with all original alerts after mid-run failure
+ok 3 - idempotent retry — chunk 1 not re-sent after chunk 2 failure
 # tests 3 | pass 3 | fail 0
 ```
 
-Test 2 ("partial failure") verifies the incremental queue contract:
-- After chunk 1 succeeds, `pending_alerts.json` is rewritten with only the remaining (unsent) tweets
-- After chunk 2 fails, `pending_alerts.json` is unchanged — still contains only the unsent tweets
-- Chunk 1 tweets are confirmed absent; chunk 2 tweets are confirmed present
+Queue contract verified by Test 2:
+- `pending_alerts.json` is **never modified mid-run** — only cleared after ALL chunks succeed
+- On partial failure, `pending_alerts.json` is left **unchanged** — all original alerts still present for retry
+- Sent tweet URLs are written to `pending_alerts.sent.json` after each chunk success (sidecar tracking)
+- The sidecar file lets retry skip already-posted chunks without touching the main queue file
 
 Test 3 (idempotent retry) verifies no duplicate Discord alerts:
-- On retry, `pending_alerts.json` is read — it contains only unsent tweets from the failed run
-- Retry chunks cover only those tweets — chunk 1 NOT re-sent
-- Combined coverage (first run + retry) accounts for all original tweets
+- On retry, `pending_alerts.json` still has ALL tweets; tracking file filters out chunk 1 URLs
+- Only chunk 2 tweets are built into chunks and posted — chunk 1 NOT re-sent
+- Total coverage: all original tweets accounted for across first run + retry
 
 **Extended chunker tests (`test-chunker.cjs` — 29 tests):**
 ```
@@ -185,14 +186,14 @@ Pending alerts: 2
 Built 1 Discord chunk(s) from 2 tweet(s)
 Posting chunk 1/1 (321 chars, 2 tweet(s))
 Discord post failed on chunk 1/1: Discord HTTP 403 (forbidden — bot lacks Send Messages permission in channel): {"message": "Missing Access", "code": 50001}
-pending_alerts.json updated — 2 alert(s) still pending, retry to continue
+pending_alerts.json preserved — 2 alert(s) still unsent, retry to continue
 ```
 
 The script correctly:
 - Reads `pending_alerts.json` and counts alerts
 - Builds chunks with `{text, tweets}` pairs (321 chars, 2 tweets in chunk 1)
 - Attempts Discord post (403 = bot permission issue on this test token, not a code defect)
-- On success, removes posted tweets from `pending_alerts.json` incrementally; on failure, preserves current queue state for safe retry
+- Leaves `pending_alerts.json` UNCHANGED on failure — all alerts preserved for safe retry
 
 ### 7. Enable cron job
 
