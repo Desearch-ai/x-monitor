@@ -97,3 +97,42 @@ Importance levels:
 ## Cron Schedule
 
 Default: every 2 hours. Change in OpenClaw cron settings.
+
+## Queue Lifecycle (pending_alerts.json)
+
+`pending_alerts.json` is the handoff file between `monitor.py` and `post-to-discord.cjs`.
+
+```
+monitor.py  ──writes──▶  pending_alerts.json  ──reads──▶  post-to-discord.cjs
+```
+
+**Write side (monitor.py):**
+- Each run overwrites `pending_alerts.json` with only the *new* tweets found in that run.
+- If `post-to-discord.cjs` has not yet consumed a previous batch, that batch will be
+  replaced. Design the cron so the poster runs immediately after the monitor.
+
+**Read/consume side (post-to-discord.cjs):**
+- Reads all pending tweets, groups them by `_monitor_category`, and splits into
+  Discord-safe chunks (≤ 1900 chars each).
+- Posts chunks one at a time. **After each chunk posts successfully**, those tweets are
+  removed from `pending_alerts.json` immediately (incremental update).
+- If a later chunk fails, all earlier chunks are already durably removed. The remaining
+  tweets stay in `pending_alerts.json` and a non-zero exit code is returned.
+- Re-running `post-to-discord.cjs` after a partial failure is safe: it will only send
+  the chunks that are still pending — no duplicates.
+
+**Channel configuration:**
+- Channel ID must be set as `config.discord.alerts_channel` in `config.json`.
+- Both `post-to-discord.cjs` and `summarize.py` read from this single source of truth.
+
+**Dry-run verification:**
+```bash
+# Check what would be posted without actually posting:
+node -e "
+  const {buildChunks, readPendingAlerts} = require('./post-to-discord.cjs');
+  const t = readPendingAlerts('./pending_alerts.json');
+  const c = buildChunks(t);
+  console.log(c.length + ' chunk(s), tweets: ' + t.length);
+  c.forEach((ch, i) => console.log('Chunk ' + (i+1) + ' (' + ch.tweets.length + ' tweets, ' + ch.text.length + ' chars)'));
+"
+```
