@@ -121,13 +121,15 @@ assert(line.length < 300, `tweetLine length ${line.length} < 300`)
 console.log('\nTest 8: partial failure preserves unsent tweets in pending_alerts.json')
 {
   const tmpFile = path.join(require('os').tmpdir(), `pending_test_${Date.now()}.json`)
-  const tweets = [makeTweet(1), makeTweet(2), makeTweet(3)]
+  // Use 20 tweets to guarantee ≥ 2 chunks (each tweet line ~140 chars, 2000-char limit)
+  const tweets = Array.from({ length: 20 }, (_, i) => makeTweet(i + 500))
   fs.writeFileSync(tmpFile, JSON.stringify(tweets))
 
   const testChunks = buildChunks(tweets)
-  // Simulate: chunk 1 succeeds, chunk 2 fails
+  assert(testChunks.length >= 2, `need ≥ 2 chunks for test (got ${testChunks.length})`)
+
   if (testChunks.length >= 2) {
-    // Chunk 1 succeeds — remove its tweets
+    // Chunk 1 succeeds — remove its tweets immediately
     const sentUrls = new Set(testChunks[0].tweets.map(t => t.url))
     let remaining = tweets.filter(t => !sentUrls.has(t.url))
     fs.writeFileSync(tmpFile, JSON.stringify(remaining))
@@ -139,14 +141,15 @@ console.log('\nTest 8: partial failure preserves unsent tweets in pending_alerts
     )
     assert(
       !afterChunk1.some(t => sentUrls.has(t.url)),
-      'sent tweets are removed from pending file immediately'
+      'chunk 1 tweets are removed from pending file immediately after success'
     )
-    // chunk 2 fails — file unchanged (still has remaining)
+    // chunk 2 fails — file is already updated with remaining; no further change
     const afterFailure = JSON.parse(fs.readFileSync(tmpFile, 'utf8'))
-    assert(afterFailure.length === afterChunk1.length, 'chunk 2 failure: file unchanged')
-  } else {
-    // Only 1 chunk — test not applicable (skip cleanly)
-    assert(true, `only 1 chunk produced — partial-failure test skipped`)
+    assert(afterFailure.length === afterChunk1.length, 'chunk 2 failure: file unchanged (chunk 1 removal preserved)')
+    assert(
+      afterFailure.length === tweets.length - testChunks[0].tweets.length,
+      `remaining count matches tweets.length - chunk1.tweets.length`
+    )
   }
   fs.unlinkSync(tmpFile)
 }

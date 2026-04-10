@@ -88,7 +88,7 @@ const tweets = JSON.parse(fs.readFileSync('pending_alerts.json', 'utf8'));
 const chunks = buildChunks(tweets);
 console.log('tweets:', tweets.length);
 console.log('chunks:', chunks.length);
-console.log('chunk lengths:', chunks.map(c => c.length));
+console.log('chunk lengths:', chunks.map(c => c.text.length));
 NODE
 
 # 5. Post for real — verify chunk count, char lengths, and final clear
@@ -136,20 +136,22 @@ node run-summarizer.cjs
 
 Two targeted test scripts ship with the repo to prove the key fixes are working.
 
-**Node — chunker / Discord safety:**
+**Node — chunker / Discord safety + queue lifecycle:**
 ```bash
 node test-chunker.cjs
-# Tests: 17 | Passed: 17 | Failed: 0
+# Tests: 25 | Passed: 25 | Failed: 0
 # RESULT: PASS
 ```
 What it verifies:
 - Empty / null input returns 0 chunks
-- Single tweet produces one ≤ 2000-char chunk with the `🔔 X Monitor` header
+- Single tweet produces one ≤ 2000-char `{text, tweets}` chunk with the `🔔 X Monitor` header
 - 30 tweets split into multiple chunks, every chunk ≤ 2000 chars
-- Every tweet `@-mention` appears in at least one chunk (full coverage)
+- Every tweet covered exactly once across all chunks (no missing, no duplicates)
 - 50-tweet, 2-category payload produces only ≤ 2000-char chunks
 - Category labels survive chunk boundaries
 - `tweetLine()` truncates text above the 100-char cap
+- **Queue lifecycle**: partial failure (chunk 2 fails) leaves only unsent tweets in pending_alerts.json
+- **Queue lifecycle**: retry after partial failure — chunk 1 tweets not re-included
 
 **Python — config-key consistency / pending-alerts semantics:**
 ```bash
