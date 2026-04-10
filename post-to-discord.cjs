@@ -2,7 +2,7 @@
 /**
  * X Monitor — Direct Discord poster (no LLM overhead)
  * Reads pending_alerts.json, splits into Discord-safe chunks, posts to #x-alerts.
- * Chunks preserve category grouping; pending_alerts.json is cleared only after all chunks succeed.
+ * Chunks preserve category grouping; pending_alerts.json is updated per-chunk so partial failures are safe to retry.
  * Format (first chunk):
  *   🔔 X Monitor
  *
@@ -97,7 +97,8 @@ function tweetLine(t) {
  * - First chunk is prefixed with "🔔 X Monitor".
  * - Category grouping is preserved; large categories split across chunks with the
  *   category header repeated at the start of the continuation chunk.
- * - pending_alerts.json is only cleared after all chunks are confirmed sent.
+ * - Returns {text, tweets}[] so main() can remove each chunk's tweets from
+ *   pending_alerts.json immediately after each successful post (incremental update).
  */
 function buildChunks(tweets) {
   if (!tweets || tweets.length === 0) return []
@@ -115,20 +116,23 @@ function buildChunks(tweets) {
 
   const chunks = []
   let buf = HEADER  // first chunk always starts with the header
+  let chunkTweets = []
 
   // Append sep+text to buf if it fits; return true on success, false otherwise.
-  function tryAppend(sep, text) {
+  function tryAppend(sep, text, tweet) {
     const candidate = buf === '' ? text : buf + sep + text
     if (candidate.length <= MAX) {
       buf = candidate
+      if (tweet) chunkTweets.push(tweet)
       return true
     }
     return false
   }
 
   function flush() {
-    if (buf) chunks.push(buf)
+    if (buf) chunks.push({ text: buf, tweets: chunkTweets })
     buf = ''
+    chunkTweets = []
   }
 
   for (const [cat, catTweets] of groups) {
@@ -141,20 +145,22 @@ function buildChunks(tweets) {
         // First time we encounter this category in the current chunk.
         // Try to add "catName\nline" as a block (joined to current content with \n\n).
         const catLine = `${cat}\n${line}`
-        if (tryAppend('\n\n', catLine)) {
+        if (tryAppend('\n\n', catLine, tweet)) {
           catHeaderInBuf = true
         } else {
           // Doesn't fit — flush and open a new chunk with this category block.
           flush()
           buf = catLine
+          chunkTweets = [tweet]
           catHeaderInBuf = true
         }
       } else {
         // Category header is already in the current chunk; add the line with \n.
-        if (!tryAppend('\n', line)) {
+        if (!tryAppend('\n', line, tweet)) {
           // Doesn't fit — flush and continue the category in a new chunk.
           flush()
           buf = `${cat}\n${line}`
+          chunkTweets = [tweet]
           // catHeaderInBuf stays true: the category header is re-added above.
         }
       }
@@ -205,21 +211,25 @@ async function main() {
   const chunks = buildChunks(tweets)
   console.log(`Built ${chunks.length} Discord chunk(s) from ${tweets.length} tweet(s)`)
 
+  // Track remaining alerts — remove each chunk's tweets immediately after a successful post.
+  // This ensures partial failure is safe: already-sent tweets are not re-sent on retry.
+  let remaining = [...tweets]
   for (let i = 0; i < chunks.length; i++) {
-    const chunk = chunks[i]
-    console.log(`Posting chunk ${i + 1}/${chunks.length} (${chunk.length} chars)`)
+    const { text, tweets: chunkTweets } = chunks[i]
+    console.log(`Posting chunk ${i + 1}/${chunks.length} (${text.length} chars, ${chunkTweets.length} tweet(s))`)
     try {
-      await postToDiscord(token, channelId, chunk)
-      console.log(`  chunk ${i + 1} OK`)
+      await postToDiscord(token, channelId, text)
+      const sentUrls = new Set(chunkTweets.map(t => t.url))
+      remaining = remaining.filter(t => !sentUrls.has(t.url))
+      fs.writeFileSync(PENDING_ALERTS_FILE, JSON.stringify(remaining), 'utf8')
+      console.log(`  chunk ${i + 1} OK — ${remaining.length} alert(s) still pending`)
     } catch (e) {
       console.error(`Discord post failed on chunk ${i + 1}/${chunks.length}: ${e.message}`)
-      console.error('pending_alerts.json preserved (not cleared) — fix the error and retry')
+      console.error('pending_alerts.json preserved for retry — only unsent alerts remain')
       process.exit(1)
     }
   }
 
-  // All chunks confirmed sent — safe to clear
-  fs.writeFileSync(PENDING_ALERTS_FILE, '[]', 'utf8')
   console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
 }
 
