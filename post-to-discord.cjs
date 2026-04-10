@@ -2,7 +2,8 @@
 /**
  * X Monitor — Direct Discord poster (no LLM overhead)
  * Reads pending_alerts.json, splits into Discord-safe chunks, posts to #x-alerts.
- * Chunks preserve category grouping; pending_alerts.json is updated per-chunk so partial failures are safe to retry.
+ * Chunks preserve category grouping. pending_alerts.json is only cleared after all chunks succeed.
+ * Sent tweet URLs are tracked in pending_alerts.sent.json so retries never re-post already-sent chunks.
  * Format (first chunk):
  *   🔔 X Monitor
  *
@@ -19,6 +20,7 @@ const fs = require('fs')
 
 const MONITOR_DIR = path.dirname(__filename)
 const PENDING_ALERTS_FILE = path.join(MONITOR_DIR, 'pending_alerts.json')
+const SENT_TRACKING_FILE = path.join(MONITOR_DIR, 'pending_alerts.sent.json')
 const CONFIG_FILE = path.join(MONITOR_DIR, 'config.json')
 const MAX_TWEET_TEXT = 100
 const DISCORD_MAX_LEN = 2000
@@ -208,28 +210,44 @@ async function main() {
     process.exit(0)
   }
 
-  const chunks = buildChunks(tweets)
-  console.log(`Built ${chunks.length} Discord chunk(s) from ${tweets.length} tweet(s)`)
+  // Load sent-tweet tracking file from any previous partial run.
+  // This lets us skip already-posted tweets on retry without modifying pending_alerts.json mid-run.
+  let sentUrls = new Set()
+  if (fs.existsSync(SENT_TRACKING_FILE)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(SENT_TRACKING_FILE, 'utf8'))
+      if (Array.isArray(raw)) sentUrls = new Set(raw)
+    } catch { /* ignore corrupt tracking file */ }
+  }
 
-  // Track remaining alerts — remove each chunk's tweets immediately after a successful post.
-  // This ensures partial failure is safe: already-sent tweets are not re-sent on retry.
-  let remaining = [...tweets]
+  // Filter out already-sent tweets so retry never re-posts a chunk
+  const unsentTweets = tweets.filter(t => !sentUrls.has(t.url))
+  if (unsentTweets.length < tweets.length) {
+    console.log(`Resuming after partial failure — ${tweets.length - unsentTweets.length} tweet(s) already sent, ${unsentTweets.length} remaining`)
+  }
+
+  const chunks = buildChunks(unsentTweets)
+  console.log(`Built ${chunks.length} Discord chunk(s) from ${unsentTweets.length} tweet(s)`)
+
   for (let i = 0; i < chunks.length; i++) {
     const { text, tweets: chunkTweets } = chunks[i]
     console.log(`Posting chunk ${i + 1}/${chunks.length} (${text.length} chars, ${chunkTweets.length} tweet(s))`)
     try {
       await postToDiscord(token, channelId, text)
-      const sentUrls = new Set(chunkTweets.map(t => t.url))
-      remaining = remaining.filter(t => !sentUrls.has(t.url))
-      fs.writeFileSync(PENDING_ALERTS_FILE, JSON.stringify(remaining), 'utf8')
-      console.log(`  chunk ${i + 1} OK — ${remaining.length} alert(s) still pending`)
+      // Record sent tweet URLs immediately so retry skips them
+      for (const t of chunkTweets) sentUrls.add(t.url)
+      fs.writeFileSync(SENT_TRACKING_FILE, JSON.stringify([...sentUrls]), 'utf8')
+      console.log(`  chunk ${i + 1} OK — ${unsentTweets.length - sentUrls.size + sentUrls.size} total sent`)
     } catch (e) {
       console.error(`Discord post failed on chunk ${i + 1}/${chunks.length}: ${e.message}`)
-      console.error('pending_alerts.json preserved for retry — only unsent alerts remain')
+      console.error(`pending_alerts.json preserved — ${tweets.length - sentUrls.size} alert(s) still unsent, retry to continue`)
       process.exit(1)
     }
   }
 
+  // All chunks confirmed sent — clear pending alerts and tracking file
+  fs.writeFileSync(PENDING_ALERTS_FILE, '[]', 'utf8')
+  if (fs.existsSync(SENT_TRACKING_FILE)) fs.unlinkSync(SENT_TRACKING_FILE)
   console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
 }
 
@@ -237,6 +255,7 @@ module.exports = {
   buildChunks,
   tweetLine,
   getChannelId,
+  SENT_TRACKING_FILE,
 }
 
 if (require.main === module) {
