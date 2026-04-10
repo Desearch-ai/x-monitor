@@ -134,24 +134,31 @@ node run-summarizer.cjs
 
 ### 6. Run automated verification tests
 
-Two targeted test scripts ship with the repo to prove the key fixes are working.
-
-**Node — chunker / Discord safety + queue lifecycle:**
-```bash
-node test-chunker.cjs
-# Tests: 25 | Passed: 25 | Failed: 0
-# RESULT: PASS
+**Formal queue lifecycle tests (`tests/test_post_to_discord.cjs`):**
 ```
-What it verifies:
-- Empty / null input returns 0 chunks
-- Single tweet produces one ≤ 2000-char `{text, tweets}` chunk with the `🔔 X Monitor` header
-- 30 tweets split into multiple chunks, every chunk ≤ 2000 chars
-- Every tweet covered exactly once across all chunks (no missing, no duplicates)
-- 50-tweet, 2-category payload produces only ≤ 2000-char chunks
-- Category labels survive chunk boundaries
-- `tweetLine()` truncates text above the 100-char cap
-- **Queue lifecycle**: partial failure (chunk 2 fails) leaves only unsent tweets in pending_alerts.json
-- **Queue lifecycle**: retry after partial failure — chunk 1 tweets not re-included
+$ node --test tests/test_post_to_discord.cjs
+TAP version 13
+ok 1 - buildChunks returns {text, tweets} pairs and splits oversized batches into Discord-safe chunks
+ok 2 - queue lifecycle — partial failure: pending_alerts.json unchanged if chunk 2 fails
+ok 3 - idempotent retry — chunk 1 not re-sent after chunk 2 failure
+# tests 3 | pass 3 | fail 0
+```
+
+Test 2 ("unchanged if chunk 2 fails") verifies the incremental queue contract:
+- After chunk 1 success: chunk 1 tweets are removed from `pending_alerts.json`
+- After chunk 2 failure: `pending_alerts.json` is NOT changed further (chunk 2 tweets preserved)
+- Net: file contains exactly chunk 2's tweets; chunk 1 tweets are gone
+
+Test 3 (idempotent retry) verifies no duplicate Discord alerts:
+- After partial failure, retry only includes chunk 2 tweets — chunk 1 is NOT re-posted
+
+**Extended chunker tests (`test-chunker.cjs` — 29 tests):**
+```
+$ node test-chunker.cjs
+Tests: 29 | Passed: 29 | Failed: 0
+RESULT: PASS
+```
+Covers: chunk sizing, tweet coverage, category grouping, tweetLine truncation, partial failure file state, idempotent retry tweet exclusion.
 
 **Python — config-key consistency / pending-alerts semantics:**
 ```bash
@@ -165,6 +172,25 @@ What it verifies:
 - `summarize.py` reads `config["discord"]["alerts_channel"]` (not any stale key)
 - `post-to-discord.cjs` reads `cfg.discord?.alerts_channel`
 - Failure-preservation log and success-clear log are both present in `post-to-discord.cjs`
+
+### 7. Runtime verification — posting flow
+
+Actual run of `node post-to-discord.cjs` with 2 test tweets:
+```
+$ node post-to-discord.cjs
+Discord channel: 1477727527618347340
+Pending alerts: 2
+Built 1 Discord chunk(s) from 2 tweet(s)
+Posting chunk 1/1 (321 chars, 2 tweet(s))
+Discord post failed on chunk 1/1: Discord HTTP 403 (forbidden — bot lacks Send Messages permission in channel): {"message": "Missing Access", "code": 50001}
+pending_alerts.json preserved for retry — only unsent alerts remain
+```
+
+The script correctly:
+- Reads `pending_alerts.json` and counts alerts
+- Builds chunks with `{text, tweets}` pairs (321 chars, 2 tweets in chunk 1)
+- Attempts Discord post (403 = bot permission issue on this test token, not a code defect)
+- Preserves `pending_alerts.json` unchanged on failure — no alerts lost
 
 ### 7. Enable cron job
 
