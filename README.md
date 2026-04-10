@@ -98,6 +98,33 @@ Importance levels:
 
 Default: every 2 hours. Change in OpenClaw cron settings.
 
+## Testing & Verification
+
+### Run the test suite
+
+```bash
+node test-post-to-discord.cjs
+```
+
+Expected output: `Results: 9 passed, 0 failed`
+
+Covers:
+- `buildChunks`: empty input, single tweet, Discord-limit enforcement, no duplicates, order preservation, category splits
+- **Test 1 (partial failure):** chunk 1 posts → tweets durably removed from queue; chunk 2 fails → its tweets preserved for retry
+- **Test 2 (idempotent retry):** re-running only sends remaining chunks — chunk 1 is never re-sent
+
+### Inspect pending queue without posting
+
+```bash
+node -e "
+  const {buildChunks, readPendingAlerts} = require('./post-to-discord.cjs');
+  const t = readPendingAlerts('./pending_alerts.json');
+  const c = buildChunks(t);
+  console.log(c.length + ' chunk(s), tweets: ' + t.length);
+  c.forEach((ch, i) => console.log('Chunk ' + (i+1) + ' (' + ch.tweets.length + ' tweets, ' + ch.text.length + ' chars)'));
+"
+```
+
 ## Queue Lifecycle (pending_alerts.json)
 
 `pending_alerts.json` is the handoff file between `monitor.py` and `post-to-discord.cjs`.
@@ -125,14 +152,4 @@ monitor.py  ──writes──▶  pending_alerts.json  ──reads──▶  po
 - Channel ID must be set as `config.discord.alerts_channel` in `config.json`.
 - Both `post-to-discord.cjs` and `summarize.py` read from this single source of truth.
 
-**Dry-run verification:**
-```bash
-# Check what would be posted without actually posting:
-node -e "
-  const {buildChunks, readPendingAlerts} = require('./post-to-discord.cjs');
-  const t = readPendingAlerts('./pending_alerts.json');
-  const c = buildChunks(t);
-  console.log(c.length + ' chunk(s), tweets: ' + t.length);
-  c.forEach((ch, i) => console.log('Chunk ' + (i+1) + ' (' + ch.tweets.length + ' tweets, ' + ch.text.length + ' chars)'));
-"
-```
+**Dry-run verification:** see the "Inspect pending queue without posting" command in the Testing section above.

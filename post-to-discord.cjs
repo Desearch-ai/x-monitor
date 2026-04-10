@@ -74,11 +74,11 @@ function postToDiscord (token, channelId, message) {
           let discordBody = data
           try { discordBody = JSON.stringify(JSON.parse(data)) } catch {}
           let issue = 'discord-api-error'
-          if (res.statusCode === 400 && contentLength > 2000) issue = 'payload-too-large'
+          if (res.statusCode === 400 && message.length > 2000) issue = 'payload-too-large'
           else if (res.statusCode === 401) issue = 'invalid-token'
           else if (res.statusCode === 403) issue = 'missing-channel-permission'
           reject(new Error(
-            `Discord ${res.statusCode} [${issue}] channel=${channelId} contentLength=${contentLength}: ${discordBody}`
+            `Discord ${res.statusCode} [${issue}] channel=${channelId} contentChars=${message.length} bodyBytes=${contentLength}: ${discordBody}`
           ))
         } else {
           try { resolve(JSON.parse(data)) } catch { resolve({}) }
