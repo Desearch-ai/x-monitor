@@ -97,3 +97,8 @@ Importance levels:
 ## Cron Schedule
 
 Default: every 2 hours. Change in OpenClaw cron settings.
+
+
+## Runtime verification artifact
+
+See `docs/runtime-verification.md` for the repo-visible build/test commands and the manual end-to-end Discord verification log.

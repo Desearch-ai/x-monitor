@@ -107,6 +107,32 @@ def load_config() -> dict:
     return json.loads(CONFIG_FILE.read_text())
 
 
+
+
+def load_pending_alerts() -> list:
+    if not PENDING_ALERTS_FILE.exists():
+        return []
+    try:
+        data = json.loads(PENDING_ALERTS_FILE.read_text())
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+
+def merge_pending_alerts(existing: list, new_items: list) -> list:
+    merged: list = []
+    seen_ids: set[str] = set()
+
+    for tweet in existing + new_items:
+        tid = str(tweet.get("id") or tweet.get("id_str") or "")
+        if tid:
+            if tid in seen_ids:
+                continue
+            seen_ids.add(tid)
+        merged.append(tweet)
+
+    return merged
+
 def run_desearch(args: list) -> tuple[dict | list | None, str | None]:
     """Run the desearch.py script and return parsed JSON result."""
     api_key = os.environ.get("DESEARCH_API_KEY")
@@ -330,8 +356,9 @@ def main():
         window_count = save_window(merged)
         output["window_updated"] = window_count
 
-        # Write new tweets to pending_alerts.json for post-to-discord.cjs to consume
-        PENDING_ALERTS_FILE.write_text(json.dumps(new_tweets, indent=2, ensure_ascii=False))
+        # Merge with any still-unsent queue items so failed Discord deliveries are preserved
+        pending_alerts = merge_pending_alerts(load_pending_alerts(), new_tweets)
+        PENDING_ALERTS_FILE.write_text(json.dumps(pending_alerts, indent=2, ensure_ascii=False))
 
     print(json.dumps(output, indent=2, ensure_ascii=False))
 
