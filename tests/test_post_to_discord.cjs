@@ -35,22 +35,21 @@ test('buildChunks returns {text, tweets} pairs and splits oversized batches into
   assert.equal(urls.size, tweets.length, 'no tweet should appear in multiple chunks')
 })
 
-test('partial failure: chunk 1 tweets removed from queue, chunk 2 tweets preserved for retry', async () => {
-  // Queue lifecycle contract (incremental model):
-  //   - After chunk 1 succeeds, pending_alerts.json is rewritten with only chunk 2 tweets
-  //   - After chunk 2 fails, pending_alerts.json is unchanged (still has chunk 2 tweets)
-  //   - On retry, reading the updated file gives only the unsent tweets — chunk 1 NOT re-posted
+test('partial failure preserves queue: pending_alerts.json unchanged after failed chunk, all unsent tweets retained', async () => {
+  // Queue lifecycle — incremental model (spec Test 1: "partial success must not clear the file"):
+  //   - After each successful chunk, pending_alerts.json is rewritten with only the unsent tweets.
+  //   - After a FAILED chunk, pending_alerts.json is NOT modified — the failure itself must not touch the file.
+  //   - Result: after failure, pending_alerts.json = state just before failure = all unsent tweets still present.
+  //   - No tweet is lost: delivered tweets + remaining queue = all original tweets.
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xmon-test-'))
   const pendingFile = path.join(tmpDir, 'pending_alerts.json')
 
-  // Build enough tweets to guarantee 2+ chunks
   const tweets = Array.from({ length: 40 }, (_, i) => makeTweet(i + 1, 'desearch', 'x'.repeat(180)))
   fs.writeFileSync(pendingFile, JSON.stringify(tweets))
 
   const chunks = buildChunks(tweets)
   assert.ok(chunks.length >= 2, 'need at least 2 chunks for this test')
 
-  // Simulate the posting loop with incremental file updates (mirrors main() behavior)
   let callCount = 0
   const mockPost = async () => {
     callCount++
@@ -58,8 +57,11 @@ test('partial failure: chunk 1 tweets removed from queue, chunk 2 tweets preserv
   }
 
   let remaining = [...tweets]
+  let fileBeforeFailure = null
   let errorCaught = false
   for (const { tweets: chunkTweets } of chunks) {
+    // Snapshot file state before each attempt — after failure, file must match this snapshot
+    fileBeforeFailure = fs.readFileSync(pendingFile, 'utf8')
     try {
       await mockPost()
       const sentUrls = new Set(chunkTweets.map(t => t.url))
@@ -73,22 +75,21 @@ test('partial failure: chunk 1 tweets removed from queue, chunk 2 tweets preserv
 
   assert.ok(errorCaught, 'should have caught chunk 2 error')
 
-  // pending_alerts.json must contain ONLY chunk 2 tweets — chunk 1 tweets were removed on success
-  const fileAfter = JSON.parse(fs.readFileSync(pendingFile, 'utf8'))
-  const chunk1Urls = new Set(chunks[0].tweets.map(t => t.url))
-  const chunk2Urls = new Set(chunks[1].tweets.map(t => t.url))
+  // The failure must NOT have modified the file — pending_alerts.json must match the snapshot taken before the failure
+  const fileAfterFailure = fs.readFileSync(pendingFile, 'utf8')
+  assert.equal(fileAfterFailure, fileBeforeFailure,
+    'pending_alerts.json must be UNCHANGED by the failure — only successful posts update the queue')
 
-  for (const t of fileAfter) {
-    assert.ok(!chunk1Urls.has(t.url),
-      `chunk 1 tweet ${t.url} must have been removed from pending_alerts.json after successful post`)
+  // All unsent tweets must still be present (no data loss)
+  const fileData = JSON.parse(fileAfterFailure)
+  const chunk1SentUrls = new Set(chunks[0].tweets.map(t => t.url))
+  for (const t of fileData) {
+    assert.ok(!chunk1SentUrls.has(t.url),
+      `tweet ${t.url} was already delivered in chunk 1 — must NOT remain in queue`)
   }
-  for (const url of chunk2Urls) {
-    assert.ok(fileAfter.some(t => t.url === url),
-      `chunk 2 tweet ${url} must still be in pending_alerts.json for retry`)
-  }
-  const expectedRemaining = tweets.length - chunks[0].tweets.length
-  assert.equal(fileAfter.length, expectedRemaining,
-    `pending_alerts.json must contain exactly ${expectedRemaining} tweets after chunk 1 removed`)
+  // No tweet is lost: delivered + queue = all original tweets
+  assert.equal(fileData.length + chunks[0].tweets.length, tweets.length,
+    'no tweet is lost: delivered tweets + remaining queue = all original tweets')
 
   fs.rmSync(tmpDir, { recursive: true })
 })
@@ -99,7 +100,7 @@ test('idempotent retry — on retry, only unsent tweets are posted; chunk 1 not 
   assert.ok(chunks.length >= 2, 'need at least 2 chunks for this test')
 
   // First run: chunk 1 succeeds, chunk 2 fails
-  // After chunk 1 success, pending_alerts.json is updated to contain only chunk 2 tweets
+  // After chunk 1 success, pending_alerts.json is updated to contain only unsent tweets
   let remaining = [...tweets]
   let callCount = 0
   const mockPost = async () => {
@@ -117,11 +118,11 @@ test('idempotent retry — on retry, only unsent tweets are posted; chunk 1 not 
     }
   }
 
-  // `remaining` now contains only chunk 2 tweets (as would be read from updated pending_alerts.json)
-  // Retry: build chunks from the updated file contents — only chunk 2 tweets are present
+  // Retry: build chunks from the updated queue (only unsent tweets)
+  // This mirrors reading the updated pending_alerts.json on a fresh run
   const retryChunks = buildChunks(remaining)
 
-  // Retry chunks must not contain any chunk 1 tweets
+  // Retry must not contain any chunk 1 tweets (already delivered)
   const chunk1Urls = new Set(chunks[0].tweets.map(t => t.url))
   const retryUrls = new Set(retryChunks.flatMap(c => c.tweets).map(t => t.url))
   for (const url of chunk1Urls) {
@@ -129,14 +130,14 @@ test('idempotent retry — on retry, only unsent tweets are posted; chunk 1 not 
       `chunk 1 tweet ${url} must NOT appear in retry — already removed from pending_alerts.json`)
   }
 
-  // All chunk 2 tweets must be in the retry
+  // All chunk 2 tweets must be covered by retry
   const chunk2Urls = new Set(chunks[1].tweets.map(t => t.url))
   for (const url of chunk2Urls) {
     assert.ok(retryUrls.has(url),
       `chunk 2 tweet ${url} must appear in retry chunks`)
   }
 
-  // Combined coverage: chunk 1 (sent in first run) + retry covers all original tweets
+  // Combined coverage: chunk 1 (delivered) + retry = all original tweets
   const totalCovered = new Set([...chunks[0].tweets.map(t => t.url), ...retryUrls])
   assert.equal(totalCovered.size, tweets.length, 'all tweets covered across first run + retry')
 })
