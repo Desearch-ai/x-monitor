@@ -144,13 +144,14 @@ ok 3 - idempotent retry — chunk 1 not re-sent after chunk 2 failure
 # tests 3 | pass 3 | fail 0
 ```
 
-Test 2 ("unchanged if chunk 2 fails") verifies the incremental queue contract:
-- After chunk 1 success: chunk 1 tweets are removed from `pending_alerts.json`
-- After chunk 2 failure: `pending_alerts.json` is NOT changed further (chunk 2 tweets preserved)
-- Net: file contains exactly chunk 2's tweets; chunk 1 tweets are gone
+Test 2 ("unchanged if chunk 2 fails") verifies the queue contract:
+- `pending_alerts.json` is UNCHANGED after partial failure — all original alerts preserved
+- Sent tweet URLs are written to `pending_alerts.sent.json` after each successful chunk
+- `pending_alerts.sent.json` contains chunk 1 URLs; main queue file is untouched
 
 Test 3 (idempotent retry) verifies no duplicate Discord alerts:
-- After partial failure, retry only includes chunk 2 tweets — chunk 1 is NOT re-posted
+- On retry, `pending_alerts.sent.json` is read at startup; chunk 1 tweets filtered out
+- Only chunk 2 tweets are built into chunks and re-posted — chunk 1 NOT re-sent
 
 **Extended chunker tests (`test-chunker.cjs` — 29 tests):**
 ```
@@ -183,14 +184,14 @@ Pending alerts: 2
 Built 1 Discord chunk(s) from 2 tweet(s)
 Posting chunk 1/1 (321 chars, 2 tweet(s))
 Discord post failed on chunk 1/1: Discord HTTP 403 (forbidden — bot lacks Send Messages permission in channel): {"message": "Missing Access", "code": 50001}
-pending_alerts.json preserved for retry — only unsent alerts remain
+pending_alerts.json preserved — 2 alert(s) still unsent, retry to continue
 ```
 
 The script correctly:
 - Reads `pending_alerts.json` and counts alerts
 - Builds chunks with `{text, tweets}` pairs (321 chars, 2 tweets in chunk 1)
 - Attempts Discord post (403 = bot permission issue on this test token, not a code defect)
-- Preserves `pending_alerts.json` unchanged on failure — no alerts lost
+- Leaves `pending_alerts.json` UNCHANGED on failure — all alerts preserved for safe retry
 
 ### 7. Enable cron job
 
