@@ -26,6 +26,43 @@ WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
 PENDING_ALERTS_FILE = SCRIPT_DIR / "pending_alerts.json"
 DESEARCH_SCRIPT = Path.home() / ".openclaw/workspace/skills/desearch-x-search/scripts/desearch.py"
 
+# ─── Anti-concurrency lock ────────────────────────────────────────────────
+LOCK_FILE = SCRIPT_DIR / ".monitor.lock"
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Return True if pid is a running process."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def acquire_lock() -> bool:
+    """Acquire exclusive run lock. Return False if another instance holds it."""
+    if LOCK_FILE.exists():
+        try:
+            pid = int(LOCK_FILE.read_text().strip())
+            if _is_process_alive(pid):
+                print(f"[monitor] Lock held by PID {pid} — another instance running. Exiting.", file=sys.stderr)
+                return False
+        except (ValueError, OSError):
+            pass
+        # Stale lock — remove it
+        LOCK_FILE.unlink()
+    LOCK_FILE.write_text(str(os.getpid()))
+    return True
+
+
+def release_lock():
+    """Release lock on normal exit."""
+    try:
+        LOCK_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 
 def load_state() -> dict:
     if STATE_FILE.exists():
@@ -337,4 +374,9 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if not acquire_lock():
+        sys.exit(1)
+    try:
+        main()
+    finally:
+        release_lock()
