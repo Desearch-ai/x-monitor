@@ -239,7 +239,7 @@ def main():
 
     if not args.dry_run:
         # Post to Discord #x-alerts
-        discord_channel = config.get("discord_channel_id", "1477727527618347340")
+        discord_channel = str((config.get("discord") or {}).get("alerts_channel", ""))
         ok = send_discord(full_message, discord_channel)
         if ok:
             print("Posted to Discord.", file=sys.stderr)

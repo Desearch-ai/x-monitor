@@ -8,7 +8,12 @@ const https = require('https')
 const fs = require('fs')
 const path = require('path')
 
-const DISCORD_CHANNEL = '1477727527618347340'
+const CONFIG_FILE = path.join(__dirname, 'config.json')
+
+function getChannelId() {
+  const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
+  return String(cfg.discord?.alerts_channel || '')
+}
 const HOURS = process.argv[2] || '24'
 const SCRIPT_DIR = path.dirname(__filename)
 
@@ -66,7 +71,10 @@ async function main() {
     process.exit(0)
   }
 
-  await postToDiscord(token, DISCORD_CHANNEL, output)
+  const channelId = getChannelId()
+  if (!channelId) { console.error('No Discord channel configured'); process.exit(1) }
+
+  await postToDiscord(token, channelId, output)
   console.log('Posted daily stats')
 }
 

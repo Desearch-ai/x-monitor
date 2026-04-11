@@ -1,69 +1,70 @@
-# Known Issues
+# X Monitor Known Issues
 
-These are current limitations verified from source. They reflect real behavior gaps, not wishlist items.
+These are source-verified issues from the current repo state. They reflect real behavior gaps, not wishlist items.
 
-## 1. `CRON_PROMPT.md` points at an outdated repo path
+## 1. `filters.skip_retweets_for_normal` is dead config
 
-`CRON_PROMPT.md` tells the cron agent to run from `/Users/giga/.openclaw/workspace/x-monitor`, while the active project repo for this task lives at `/Users/giga/projects/openclaw/x-monitor`.
+**Status:** ❌ broken
 
-Why unresolved:
-- the prompt is documentation for the cron agent, not the runtime code itself
-- updating it safely should be coordinated with the live cron configuration so the prompt and scheduler stay aligned
+`config.json` exposes `filters.skip_retweets_for_normal`, but no source file reads it.
 
-Impact:
-- anyone following the prompt literally can run the wrong checkout or assume the repo still lives in the workspace mirror
+Retweet filtering for normal-importance accounts never executes regardless of the config value.
 
-## 2. `pending_alerts.json` is not durable across monitor reruns after a failed delivery
+## 2. `post-to-discord.cjs` removal is URL-only
+
+**Status:** ⚠️ degraded
+
+After a successful Discord chunk post, items are removed from `pending_alerts.json` by URL only. If two items share a URL or a tweet lacks a stable URL, the queue can remove the wrong item or preserve the wrong one after a partial failure.
+
+## 3. `pending_alerts.json` is not durable across monitor reruns after a failed delivery
+
+**Status:** ⚠️ degraded
 
 `post-to-discord.cjs` preserves `pending_alerts.json` when a Discord send fails, but `monitor.py` overwrites `pending_alerts.json` with only the latest `new_tweets` on the next successful monitor run.
 
-Why unresolved:
-- the repo currently assumes a simple monitor-then-post cadence
-- preserving unsent items correctly requires a deliberate merge policy rather than a one-line docs tweak
+Impact: if Discord posting fails and the monitor runs again before the old queue is retried, previously unsent alerts can be lost.
 
-Impact:
-- if Discord posting fails and the monitor runs again before the old queue is retried, previously unsent alerts can be lost
+## 4. Feishu digest username extraction degrades
 
-## 3. Cron prompt formatting does not match the actual Discord poster
+**Status:** ⚠️ degraded
+
+`feishu_digest.py` uses `tweet.get("username") or tweet.get("author_id") or "unknown"`. Payloads that only include `user.username` can produce degraded labels or broken `x.com` links.
+
+Feishu export is optional and disabled by default because `config.json` ships with empty Feishu credentials.
+
+## 5. Cron prompt points at old workspace path
+
+**Status:** ⚠️ degraded
+
+`CRON_PROMPT.md` tells automation to run from `/Users/giga/.openclaw/workspace/x-monitor`, but the repo lives at `/Users/giga/projects/openclaw/x-monitor`. The described flow is correct but the path is stale.
+
+## 6. Cron prompt formatting does not match the actual Discord poster
+
+**Status:** ⚠️ degraded
 
 `CRON_PROMPT.md` describes posting category batches with different high-vs-normal formatting rules. `post-to-discord.cjs` actually builds one grouped message for all queued tweets.
 
-Why unresolved:
-- the simpler grouped poster is operationally cheap and easy to run
-- the prompt and implementation have drifted, and the preferred output format has not been re-decided yet
+Impact: operators should not assume the current live alert renderer follows the richer prompt format.
 
-Impact:
-- operators should not assume the current live alert renderer follows the richer prompt format
+## 7. Some helper-script tests expect exports that don't exist
 
-## 4. Feishu digest username extraction is brittle
+**Status:** ⚠️ degraded
 
-`feishu_digest.py` prefers `tweet.get("username")` or `author_id`, while the rest of the repo commonly reads usernames from `tweet["user"]["username"]`.
+- `tests/test_post_to_discord.cjs` expects a `removeChunkTweets` export not present in production code
+- `tests/test_post_daily_stats.cjs` expects a `getChannelId` export not present in production code
 
-Why unresolved:
-- Feishu export is optional and disabled by default because `config.json` ships with empty Feishu credentials
-- the path likely sees less production traffic than Discord posting
+Tests and helper scripts are out of sync on these specific exports.
 
-Impact:
-- Feishu digests can show weaker author naming and links than the Discord and summary flows
+## 8. `post-daily-stats.cjs` is less portable than the other Discord poster
 
-## 5. `post-daily-stats.cjs` is less portable than the other Discord poster
+**Status:** ⚠️ degraded
 
 `post-daily-stats.cjs` reads the bot token directly from `/Users/giga/.openclaw/openclaw.json` and hardcodes the Discord channel, while `post-to-discord.cjs` can also use `DISCORD_BOT_TOKEN` from the environment.
 
-Why unresolved:
-- the script appears to be optimized for the OpenClaw host where it currently runs
-- broadening token and channel lookup is a real behavior change that should be tested with the cron environment
+Impact: daily stats posting is harder to reuse outside the current host setup.
 
-Impact:
-- daily stats posting is harder to reuse outside the current host setup
+## 9. X search dependency lives outside the repo
 
-## 6. The repo depends on an external shared search script path
+**Status:** ⚠️ degraded
 
-`monitor.py` shells out to `~/.openclaw/workspace/skills/desearch-x-search/scripts/desearch.py`.
-
-Why unresolved:
-- centralizing X search access in one shared script avoids duplicating search integration logic
-- decoupling this repo would require vendoring or packaging that dependency
-
-Impact:
-- the monitor will fail if that shared script moves, is removed, or changes output shape unexpectedly
+`monitor.py` shells out to `~/.openclaw/workspace/skills/desearch-x-search/scripts/desearch.py`. A fresh clone is not self-contained — if that shared script is missing or changed incompatibly, monitoring fails.

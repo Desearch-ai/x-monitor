@@ -1,4 +1,4 @@
-# Features
+# X Monitor Features
 
 Status legend:
 - ✅ working
@@ -6,44 +6,75 @@ Status legend:
 - ❌ broken
 - 🚧 in progress
 
-## Monitoring Core
+## Monitoring and collection
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| Account timeline monitoring | ✅ working | `monitor.py` fetches each configured account with `x_timeline` and tracks seen IDs per source key such as `timeline:const`. |
-| Keyword monitoring | ✅ working | Keyword searches run through the Desearch X search path and use separate source keys such as `keyword:#desearch`. |
-| Per-source deduplication | ✅ working | `state.json` stores seen IDs per source and trims each list to the latest 500 IDs. |
-| Sliding 24 hour tweet window | ✅ working | All fetched tweets are merged into `tweets_window.json` and pruned by timestamp in `save_window()`. |
-| New alert queue generation | ✅ working | Newly detected tweets are written to `pending_alerts.json` for the Discord poster. |
-| Metadata tagging | ✅ working | Tweets are enriched with `_monitor_source`, `_monitor_category`, `_monitor_importance`, and `_monitor_context`. |
-| Date normalization | ✅ working | Twitter-style `created_at` strings are converted to ISO 8601 when possible for safer window pruning. |
+### ✅ Dual-lane account monitoring
+- `monitor.py` fetches account timelines through the Desearch X search script.
+- Each account now maps to a `bucket` and a `lanes` array.
+- Tweets from monitored accounts are tagged with `_monitor_lanes` and `_monitor_route_hints`.
 
-## Delivery and Reporting
+### ✅ Dual-lane keyword monitoring
+- Keyword searches are similarly tagged with lane metadata.
+- Direct mentions (`@desearch_ai`) and brand hashtags (`#desearch`) route to the `brand` lane.
+- Community keywords (`sn22 bittensor`, `subnet22`) also route to `brand`.
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| Direct Discord alert posting | ✅ working | `post-to-discord.cjs` reads `pending_alerts.json`, builds one grouped message, posts it, then clears the queue on success. |
-| LLM summary generation | ✅ working | `summarize.py` reads the rolling window, formats up to 50 tweets, calls OpenRouter, and can post the summary to Discord. |
-| Daily stats reporting | ✅ working | `daily_stats.py` builds grouped source and category stats from `tweets_window.json`. |
-| Feishu digest export | ⚠️ degraded | The path exists and skips cleanly when Feishu config is empty, but it depends on external Feishu app setup and has brittle username handling. |
+### ✅ Per-source deduplication
+- `state.json` stores seen IDs under keys like `timeline:<username>` and `keyword:<query>`.
+- Keeps only the last 500 IDs per source to bound file growth.
+- Rolling-window dedupe is preserved from v1.
 
-## Filters and Controls
+### ✅ Rolling 24-hour tweet window
+- All fetched tweets (seen or not) are merged into `tweets_window.json`.
+- Deduplicated by tweet ID and pruned to 24 hours.
+- Window powers downstream summarization and reporting.
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| High-importance passthrough | ✅ working | Accounts marked `importance: high` bypass engagement filtering. |
-| Normal-importance engagement filtering | ✅ working | Lower-priority accounts use `normal_importance_min_likes` plus a retweet threshold in `is_important_enough()`. |
-| Reply skipping | ✅ working | Controlled by `filters.skip_replies`; current config sets it to `false`, so replies are currently included. |
-| Per-account retweet control | ✅ working | Each account can opt in to retweets with `include_retweets`. |
-| Dry-run mode | ✅ working | `monitor.py --dry-run` prints monitor output without writing runtime files. |
-| Reset mode | ✅ working | `monitor.py --reset` ignores saved seen-state for that run. |
+### ✅ Lane-based output filtering
+- `--lane-filter <founder|brand>` CLI option filters output to only tweets in that lane.
+- Useful for downstream tools that only process one lane.
 
-## Operational Fit
+### ✅ Reply filtering (configurable)
+- `filters.skip_replies` in config skips replies when enabled.
+- Shipped config currently sets it to `false`.
 
-| Feature | Status | Notes |
-| --- | --- | --- |
-| Config-driven source inventory | ✅ working | Accounts, keywords, channel settings, and filters come from `config.json`. |
-| Source-level error collection | ✅ working | Failed account or keyword fetches are added to the `errors` array in monitor output. |
-| 2 hour cron workflow | ⚠️ degraded | The cadence is documented, but `CRON_PROMPT.md` still points at an outdated repo path and describes richer category formatting than the live poster implements. |
-| Alert queue durability across failed delivery | ⚠️ degraded | `post-to-discord.cjs` preserves the queue on send failure, but a later `monitor.py` run overwrites `pending_alerts.json` instead of merging unsent items. |
-| Standard docs set | 🚧 in progress | This refresh establishes the standard docs set and records the current operational mismatches instead of hiding them. |
+### ✅ Per-account retweet inclusion
+- `include_retweets: true` on `@desearch_ai` includes retweets from that account.
+- Other accounts exclude retweets by default.
+
+### ⚠️ Normal-account engagement thresholds exist but are dormant
+- `is_important_enough()` applies `normal_importance_min_likes` for `importance: "normal"` accounts.
+- All shipped accounts are `high`, so this path is not currently exercised.
+
+### ❌ `filters.skip_retweets_for_normal` has no runtime effect
+- The config key exists, but no source file reads it.
+
+## Delivery and reporting
+
+### ✅ Discord alert queueing
+- Collection writes unseen tweets to `pending_alerts.json`.
+- Posting happens separately via `post-to-discord.cjs`.
+
+### ✅ Discord chunking
+- Tweets are grouped by `_monitor_category` and split into sub-2000-character chunks.
+- Each chunk is removed from the queue individually after successful posting.
+
+### ✅ LLM summaries
+- `summarize.py` reads `tweets_window.json`, formats up to 50 tweets, calls OpenRouter.
+
+### ✅ Daily stats
+- `daily_stats.py` produces deterministic grouped counts and top posts.
+
+### ⚠️ Feishu digest username extraction is brittle
+- Uses `tweet.get("username")` or `author_id`; payloads with only `user.username` degrade.
+
+## Operations
+
+### 🚧 Tests for v2 dual-lane behavior
+- `tests/test_monitor.py` has 11 tests covering lane metadata, bucket mapping, and dedupe safety.
+- Tests for helper scripts (`test_post_to_discord.cjs`, `test_summarize.py`) exist separately.
+
+### ⚠️ Cron prompt references old repo path
+- `CRON_PROMPT.md` points at `/Users/giga/.openclaw/workspace/x-monitor` instead of the actual path.
+
+### ⚠️ Cron prompt formatting does not match the actual Discord poster
+- `CRON_PROMPT.md` describes posting category batches with different high-vs-normal formatting rules.
+- `post-to-discord.cjs` actually builds one grouped message for all queued tweets.

@@ -1,8 +1,12 @@
-# Architecture
+# X Monitor Architecture
 
 ## Overview
 
-X Monitor is a cron-oriented, file-based pipeline for passive X/Twitter monitoring.
+X Monitor is a file-backed pipeline that polls X/Twitter for monitored accounts and keywords, deduplicates results, normalizes them with rich routing metadata, and queues output for Discord delivery.
+
+The system has two layers:
+1. **Collection** (`monitor.py`) — fetches tweets, normalizes with lane metadata, writes file artifacts
+2. **Delivery** (helper scripts) — reads artifacts and posts to Discord, Feishu, or other destinations
 
 Core roles:
 - `monitor.py` collects and normalizes tweet data
@@ -11,100 +15,128 @@ Core roles:
 - `daily_stats.py` reports grouped activity stats
 - `feishu_digest.py` writes a digest to Feishu when configured
 
-The design intentionally uses local JSON files instead of a database or queue.
+## Dual-Lane Signal Model (v2)
 
-## Repo Structure
+v2 introduces a dual-lane routing model. Each watched account or keyword now maps to:
 
-- `monitor.py`: main polling, normalization, deduplication, and fan-out entry point
-- `summarize.py`: OpenRouter-backed summarizer for `tweets_window.json`
-- `run-summarizer.cjs`: thin wrapper around `summarize.py`
-- `daily_stats.py`: grouped stats report from the rolling window
-- `post-daily-stats.cjs`: Node wrapper that posts the stats report to Discord
-- `post-to-discord.cjs`: grouped Discord alert poster for `pending_alerts.json`
-- `feishu_digest.py`: Feishu document writer for new monitor output
-- `config.json`: source inventory, filters, Discord config, and Feishu config
-- `CRON_PROMPT.md`: intended cron-agent behavior
-- `.env.example`: required and optional secret names
+- a **bucket** (e.g., `bittensor`, `desearch`, `influencer`) — the watchlist category
+- one or more **lanes** (e.g., `founder`, `brand`) — routing destinations for downstream tools
+- a **route_hint** per lane (e.g., `x-engage/founder`) — tells downstream consumers where to route the signal
 
-Generated runtime files:
-- `state.json`
-- `tweets_window.json`
-- `pending_alerts.json`
+The `founder` lane captures signals relevant to the founder personally. The `brand` lane captures signals relevant to Desearch as a product and company.
 
-## Monitoring Flow
+## Repository structure
 
-### 1. Collection
+```
+x-monitor/
+  monitor.py              # v2 collection entry point
+  config.json            # lanes, accounts, keywords, filters
+  state.json             # per-source seen-ID dedupe store
+  tweets_window.json     # rolling 24h tweet cache
+  pending_alerts.json    # Discord delivery queue
+  summarize.py           # OpenRouter-backed summarizer
+  run-summarizer.cjs     # thin wrapper around summarize.py
+  daily_stats.py         # grouped stats report from rolling window
+  post-daily-stats.cjs   # Node wrapper that posts stats to Discord
+  post-to-discord.cjs    # grouped Discord alert poster
+  feishu_digest.py       # Feishu document writer for monitor output
+  CRON_PROMPT.md         # intended cron-agent behavior
+  .env.example           # required and optional secret names
+  tests/
+    test_monitor.py     # v2 lane metadata + dedupe tests
+  docs/
+    architecture.md      # this file
+    features.md         # feature inventory
+    known-issues.md     # current limitations
+    decisions/          # architecture decision records
+```
 
-`monitor.py` reads `config.json` and loops over two source classes:
-- account timelines, fetched with `x_timeline`
-- keyword searches, fetched with the generic `x` search command
+## Collection flow
 
-Both paths shell out to the shared Desearch script at:
-`~/.openclaw/workspace/skills/desearch-x-search/scripts/desearch.py`
+```
+config.json (lanes + accounts + keywords)
+        |
+        v
+   monitor.py
+        |
+        +--> state.json              (per-source dedupe, 500 IDs/source)
+        +--> tweets_window.json       (all tweets, rolling 24h, deduplicated)
+        +--> pending_alerts.json      (new unseen tweets for Discord)
+        |
+        +--> stdout JSON ------------+--> feishu_digest.py
+                                      +--> summarize.py
+                                      +--> saved output
 
-### 2. Normalization
+pending_alerts.json --> post-to-discord.cjs --> Discord #x-alerts
+```
 
-Each tweet is enriched with monitor metadata:
-- `_monitor_source`
-- `_monitor_category`
-- `_monitor_importance`
-- `_monitor_context`
+## Normalization
 
-When `created_at` arrives in Twitter's textual format, `parse_twitter_date()` converts it to ISO 8601 so the rolling window can be pruned reliably.
+`normalize_tweet()` adds these v2 metadata fields:
 
-### 3. Deduplication
+| Field | Description |
+|---|---|
+| `_monitor_source` | Source tag: `account:<username>` or `keyword:<query>` |
+| `_monitor_bucket` | Watchlist bucket (e.g., `bittensor`, `desearch`) |
+| `_monitor_category` | Backward compat; mirrors `_monitor_bucket` |
+| `_monitor_importance` | Importance level (`high`/`normal`) |
+| `_monitor_context` | Context string from config |
+| `_monitor_lanes` | List of lanes the tweet belongs to (e.g., `["founder", "brand"]`) |
+| `_monitor_route_hints` | List of route_hint strings per lane |
 
-Seen tweet IDs are tracked per source key, for example:
-- `timeline:const`
-- `keyword:#desearch`
+## Lane resolution
 
-Each source keeps its latest 500 IDs. That is enough to suppress repeated alerts without growing `state.json` forever.
+Each tweet is tagged with lanes through a two-step lookup:
 
-### 4. Fan-out to local files
+1. **Explicit lanes** — if an account or keyword entry in config has a `lanes` array, use it directly
+2. **Bucket fallback** — if no explicit lanes, look up which lanes include the tweet's bucket in their `buckets` list
 
-The collector writes two different downstream artifacts:
-- `pending_alerts.json`: newly discovered tweets for immediate alerting
-- `tweets_window.json`: all fetched tweets still inside the last 24 hours for analysis and reporting
+```
+account: { "username": "const", "bucket": "bittensor", "lanes": ["founder", "brand"] }
+  → lanes = ["founder", "brand"]
 
-That split is the repo's core pipeline decision. Alerts only need fresh items. Summaries and stats need a broader rolling context.
+keyword: { "query": "#desearch", "bucket": "desearch" }
+  bucket "desearch" is in brand lane's buckets list
+  → lanes = ["brand"]
+```
 
-### 5. Consumers
+Route hints come from the lane definitions:
 
-#### Discord alert poster
-`post-to-discord.cjs` reads `pending_alerts.json`, groups tweets by `_monitor_category`, builds one Discord message, posts it, and clears the queue on success.
+```
+lane: { "id": "founder", "buckets": [...], "route_hint": "x-engage/founder" }
+  → route_hint = "x-engage/founder"
+```
 
-#### Summarizer
-`summarize.py` reads `tweets_window.json`, filters by an hour window, formats up to 50 tweets for the LLM, and optionally posts the summary to Discord.
+## CLI options
 
-#### Daily stats
-`daily_stats.py` reads the same rolling window, groups by source and category, and prints a compact stats report.
+```bash
+DESEARCH_API_KEY=xxx uv run python monitor.py --dry-run   # no state write
+DESEARCH_API_KEY=xxx uv run python monitor.py --reset     # rebuild dedupe state
+DESEARCH_API_KEY=xxx uv run python monitor.py --lane-filter founder  # only founder tweets
+```
 
-#### Feishu digest
-`feishu_digest.py` expects `monitor.py` JSON output and appends grouped new tweets into a configured Feishu doc.
+## Design decisions
 
-## Design Decisions
+### File-based pipeline over service stack
+JSON artifacts (state, window, alerts) serve as handoff points between collection and delivery. This enables local inspection, retry, and independent rerunning of each stage without a database. The repo is optimized for scheduled automation on one host, not for an always-on service.
 
-### File-based state instead of a database
-The repo stores state in local JSON files next to the scripts. That keeps cron execution simple and makes debugging easy because every intermediate artifact is inspectable.
+### Lanes are orthogonal to buckets
+Buckets drive what we watch; lanes drive where signals go. One account can be in `bittensor` bucket but route to both `founder` and `brand` lanes, because the founder (const) is also central to Bittensor.
+
+### Route hints instead of hardcoded routing
+`route_hint` strings (e.g., `x-engage/founder`) let downstream tools decide what to do with a signal without the monitor knowing the details. x-engage and Mission Control can interpret these hints however they like.
+
+### Category field preserved for backward compatibility
+`_monitor_category` is set equal to `_monitor_bucket` so existing consumers that read `_monitor_category` continue to work unchanged.
 
 ### Separate fresh-alert and rolling-window outputs
 Immediate alerting and later analysis have different data-retention needs. `pending_alerts.json` supports alert delivery, while `tweets_window.json` preserves enough history for summaries and 24 hour stats.
 
 ### Shared search backend
-The monitor does not talk to X directly. It delegates timeline and search calls to the shared Desearch search script. That keeps search integration centralized, but ties this repo to an external path and output shape.
+The monitor does not talk to X directly. It delegates timeline and search calls to the shared Desearch search script (`~/.openclaw/workspace/skills/desearch-x-search/scripts/desearch.py`). That keeps search integration centralized, but ties this repo to an external path and output shape.
 
 ### Mixed Python and Node tooling
 Collection, normalization, and LLM summarization live in Python. Discord posting wrappers live in Node. The split is pragmatic: Python handles data shaping, while the Node scripts provide small direct-posting entry points for cron.
-
-## Why the current design exists
-
-The repo is optimized for scheduled automation on one host, not for an always-on service.
-
-That explains:
-- command-line entry points instead of a web service
-- JSON files instead of persistent infra
-- small helper scripts for specific delivery/reporting paths
-- conservative error handling that leaves failures visible in command output
 
 ## Boundaries
 
@@ -122,4 +154,4 @@ It should not:
 
 ## ADRs
 
-See `docs/decisions/0001-file-based-monitor-pipeline.md` for the primary architecture decision recorded during this refresh.
+See `docs/decisions/0001-file-based-monitor-pipeline.md` for the primary architecture decision recorded during the docs refresh.
