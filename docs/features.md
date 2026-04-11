@@ -74,3 +74,7 @@ Status legend:
 
 ### ⚠️ Cron prompt references old repo path
 - `CRON_PROMPT.md` points at `/Users/giga/.openclaw/workspace/x-monitor` instead of the actual path.
+
+### ⚠️ Cron prompt formatting does not match the actual Discord poster
+- `CRON_PROMPT.md` describes posting category batches with different high-vs-normal formatting rules.
+- `post-to-discord.cjs` actually builds one grouped message for all queued tweets.

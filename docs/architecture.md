@@ -8,6 +8,13 @@ The system has two layers:
 1. **Collection** (`monitor.py`) — fetches tweets, normalizes with lane metadata, writes file artifacts
 2. **Delivery** (helper scripts) — reads artifacts and posts to Discord, Feishu, or other destinations
 
+Core roles:
+- `monitor.py` collects and normalizes tweet data
+- `post-to-discord.cjs` delivers fresh alerts
+- `summarize.py` generates an LLM summary from the rolling cache
+- `daily_stats.py` reports grouped activity stats
+- `feishu_digest.py` writes a digest to Feishu when configured
+
 ## Dual-Lane Signal Model (v2)
 
 v2 introduces a dual-lane routing model. Each watched account or keyword now maps to:
@@ -27,12 +34,21 @@ x-monitor/
   state.json             # per-source seen-ID dedupe store
   tweets_window.json     # rolling 24h tweet cache
   pending_alerts.json    # Discord delivery queue
+  summarize.py           # OpenRouter-backed summarizer
+  run-summarizer.cjs     # thin wrapper around summarize.py
+  daily_stats.py         # grouped stats report from rolling window
+  post-daily-stats.cjs   # Node wrapper that posts stats to Discord
+  post-to-discord.cjs    # grouped Discord alert poster
+  feishu_digest.py       # Feishu document writer for monitor output
+  CRON_PROMPT.md         # intended cron-agent behavior
+  .env.example           # required and optional secret names
   tests/
     test_monitor.py     # v2 lane metadata + dedupe tests
   docs/
     architecture.md      # this file
     features.md         # feature inventory
     known-issues.md     # current limitations
+    decisions/          # architecture decision records
 ```
 
 ## Collection flow
@@ -102,7 +118,7 @@ DESEARCH_API_KEY=xxx uv run python monitor.py --lane-filter founder  # only foun
 ## Design decisions
 
 ### File-based pipeline over service stack
-JSON artifacts (state, window, alerts) serve as handoff points between collection and delivery. This enables local inspection, retry, and independent rerunning of each stage without a database.
+JSON artifacts (state, window, alerts) serve as handoff points between collection and delivery. This enables local inspection, retry, and independent rerunning of each stage without a database. The repo is optimized for scheduled automation on one host, not for an always-on service.
 
 ### Lanes are orthogonal to buckets
 Buckets drive what we watch; lanes drive where signals go. One account can be in `bittensor` bucket but route to both `founder` and `brand` lanes, because the founder (const) is also central to Bittensor.
@@ -112,3 +128,30 @@ Buckets drive what we watch; lanes drive where signals go. One account can be in
 
 ### Category field preserved for backward compatibility
 `_monitor_category` is set equal to `_monitor_bucket` so existing consumers that read `_monitor_category` continue to work unchanged.
+
+### Separate fresh-alert and rolling-window outputs
+Immediate alerting and later analysis have different data-retention needs. `pending_alerts.json` supports alert delivery, while `tweets_window.json` preserves enough history for summaries and 24 hour stats.
+
+### Shared search backend
+The monitor does not talk to X directly. It delegates timeline and search calls to the shared Desearch search script (`~/.openclaw/workspace/skills/desearch-x-search/scripts/desearch.py`). That keeps search integration centralized, but ties this repo to an external path and output shape.
+
+### Mixed Python and Node tooling
+Collection, normalization, and LLM summarization live in Python. Discord posting wrappers live in Node. The split is pragmatic: Python handles data shaping, while the Node scripts provide small direct-posting entry points for cron.
+
+## Boundaries
+
+This repo is for passive monitoring and reporting.
+
+It should:
+- detect and package relevant X posts
+- maintain enough local state for dedupe and short-window analysis
+- hand off alerts, summaries, and digests to downstream channels
+
+It should not:
+- execute engagement actions on X
+- act as a long-term analytics warehouse
+- assume direct X API access exists inside the repo itself
+
+## ADRs
+
+See `docs/decisions/0001-file-based-monitor-pipeline.md` for the primary architecture decision recorded during the docs refresh.
