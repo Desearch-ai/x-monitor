@@ -1,141 +1,179 @@
 {
+  "lanes": [
+    {
+      "id": "founder",
+      "name": "Founder Lane",
+      "description": "Signals relevant to the founder personally — personal brand, interests, relationships",
+      "priority": "high",
+      "route_hint": "x-engage/founder",
+      "buckets": ["bittensor", "builder", "influencer", "media"]
+    },
+    {
+      "id": "brand",
+      "name": "Brand Lane",
+      "description": "Signals relevant to Desearch as a product and company",
+      "priority": "high",
+      "route_hint": "x-engage/brand",
+      "buckets": ["desearch", "subnet", "competitor", "community"]
+    }
+  ],
   "accounts": [
     {
       "username": "const",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "Bittensor Founder - all posts are important, analyze for potential use in social campaigns",
+      "lanes": ["founder", "brand"],
+      "context": "Bittensor Founder — all posts are important, analyze for potential use in social campaigns",
       "include_retweets": false
     },
     {
       "username": "desearch_ai",
-      "category": "desearch",
+      "bucket": "desearch",
       "importance": "high",
-      "context": "Our own Desearch X account - track all activity",
+      "lanes": ["brand"],
+      "context": "Our own Desearch X account — track all activity",
       "include_retweets": true
     },
     {
       "username": "marclou",
-      "category": "influencer",
+      "bucket": "influencer",
       "importance": "high",
+      "lanes": ["founder"],
       "context": "Good influencer, startup founder, writes interesting content",
       "include_retweets": false
     },
     {
       "username": "johnrushx",
-      "category": "influencer",
+      "bucket": "influencer",
       "importance": "high",
+      "lanes": ["founder"],
       "context": "Good influencer, startup founder, writes interesting content",
       "include_retweets": false
     },
     {
       "username": "markjeffrey",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "Bittensor Fund partner & influencer - tracks TAO ecosystem, subnets, and decentralized AI",
+      "lanes": ["founder", "brand"],
+      "context": "Bittensor Fund partner & influencer — tracks TAO ecosystem, subnets, and decentralized AI",
       "include_retweets": false
     },
     {
       "username": "openclaw",
-      "category": "openclaw",
+      "bucket": "openclaw",
       "importance": "high",
-      "context": "OpenClaw - the platform our assistant system is built on",
+      "lanes": ["founder"],
+      "context": "OpenClaw — the platform our assistant system is built on",
       "include_retweets": false
     },
     {
       "username": "numinous_ai",
-      "category": "subnet",
+      "bucket": "subnet",
       "importance": "high",
-      "context": "Partner subnet on Bittensor - track all activity",
+      "lanes": ["brand"],
+      "context": "Partner subnet on Bittensor — track all activity",
       "include_retweets": false
     },
     {
       "username": "SiamKidd",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "Bittensor investor, invests in subnets - monitor all posts",
+      "lanes": ["founder", "brand"],
+      "context": "Bittensor investor, invests in subnets — monitor all posts",
       "include_retweets": false
     },
     {
       "username": "ExaAILabs",
-      "category": "competitor",
+      "bucket": "competitor",
       "importance": "high",
-      "context": "Direct Desearch competitor - monitor all posts for competitive intel",
+      "lanes": ["brand"],
+      "context": "Direct Desearch competitor — monitor all posts for competitive intel",
       "include_retweets": false
     },
     {
       "username": "opentensor",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "Official Bittensor/OpenTensor Foundation account - all announcements, updates and posts are critical",
+      "lanes": ["brand"],
+      "context": "Official Bittensor/OpenTensor Foundation account — all announcements, updates and posts are critical",
       "include_retweets": false
     },
     {
       "username": "DrocksAlex2",
-      "category": "community",
+      "bucket": "community",
       "importance": "high",
-      "context": "Bittensor miner & trader - may post about Desearch/SN22, track for engagement opportunities",
+      "lanes": ["brand"],
+      "context": "Bittensor miner & trader — may post about Desearch/SN22, track for engagement opportunities",
       "include_retweets": false
     },
     {
       "username": "HungNgu76442123",
-      "category": "community",
+      "bucket": "community",
       "importance": "high",
-      "context": "Bittensor miner & trader - may post about Desearch/SN22, track for engagement opportunities",
+      "lanes": ["brand"],
+      "context": "Bittensor miner & trader — may post about Desearch/SN22, track for engagement opportunities",
       "include_retweets": false
     },
     {
       "username": "AlexFinn",
-      "category": "builder",
+      "bucket": "builder",
       "importance": "high",
+      "lanes": ["founder"],
       "context": "Founder/CEO of Creator Buddy — AI trained on X posts, 300k ARR indie builder. May collaborate or mention us",
       "include_retweets": false
     },
     {
       "username": "steipete",
-      "category": "openclaw",
+      "bucket": "openclaw",
       "importance": "high",
+      "lanes": ["founder"],
       "context": "Founder of OpenClaw — our assistant platform. All posts important, especially product updates",
       "include_retweets": false
     },
     {
       "username": "vaNlabs",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "Bittensor investor & miner, built IntoTAO.app - key community member, may post about SN22",
+      "lanes": ["founder", "brand"],
+      "context": "Bittensor investor & miner, built IntoTAO.app — key community member, may post about SN22",
       "include_retweets": false
     },
     {
       "username": "YVR_Trader",
-      "category": "bittensor",
+      "bucket": "bittensor",
       "importance": "high",
-      "context": "25-year VC & Angel Investor, BTC & TAO focus, does deep dives on all 128 Bittensor subnets - may analyze SN22",
+      "lanes": ["founder", "brand"],
+      "context": "25-year VC & Angel Investor, BTC & TAO focus, does deep dives on all 128 Bittensor subnets — may analyze SN22",
       "include_retweets": false
     }
   ],
   "keywords": [
     {
       "query": "#desearch",
-      "category": "desearch",
+      "bucket": "desearch",
       "importance": "high",
-      "context": "Our brand hashtag - all mentions important"
+      "lanes": ["brand"],
+      "context": "Our brand hashtag — all mentions important"
     },
     {
       "query": "@desearch_ai",
-      "category": "desearch",
+      "bucket": "desearch",
       "importance": "high",
+      "lanes": ["brand"],
       "context": "Direct mentions of our X account"
     },
     {
       "query": "sn22 bittensor",
-      "category": "subnet",
+      "bucket": "subnet",
       "importance": "high",
+      "lanes": ["brand"],
       "context": "Bittensor Subnet 22 community mentions"
     },
     {
       "query": "subnet22",
-      "category": "subnet",
+      "bucket": "subnet",
       "importance": "high",
+      "lanes": ["brand"],
       "context": "Subnet 22 mentions"
     }
   ],
