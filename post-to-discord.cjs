@@ -6,8 +6,28 @@ const fs = require('fs')
 const MONITOR_DIR = path.dirname(__filename)
 const CONFIG_FILE = path.join(MONITOR_DIR, 'config.json')
 const PENDING_ALERTS_FILE = path.join(MONITOR_DIR, 'pending_alerts.json')
+const PENDING_ALERTS_LOCK_DIR = path.join(MONITOR_DIR, '.pending-alerts.lock')
 const DISCORD_MAX_LEN = 2000
 const MAX_TWEET_TEXT = 100
+
+function atomicWriteJson(filePath, data) {
+  const tmpPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${process.pid}.tmp`)
+  fs.writeFileSync(tmpPath, JSON.stringify(data, null, 2))
+  fs.renameSync(tmpPath, filePath)
+}
+
+function acquireLock(lockDir = PENDING_ALERTS_LOCK_DIR) {
+  try {
+    fs.mkdirSync(lockDir)
+    fs.writeFileSync(path.join(lockDir, 'pid'), String(process.pid), 'utf8')
+    return () => fs.rmSync(lockDir, { recursive: true, force: true })
+  } catch (error) {
+    if (error && error.code === 'EEXIST') {
+      throw new Error(`post-to-discord already running, lock held at ${lockDir}`)
+    }
+    throw error
+  }
+}
 
 function getDiscordToken() {
   if (process.env.DISCORD_BOT_TOKEN) return process.env.DISCORD_BOT_TOKEN
@@ -140,28 +160,33 @@ function buildChunks(tweets) {
   return chunks
 }
 
-async function postPendingAlerts({ token = getDiscordToken(), channelId = getChannelId(), pendingFile = PENDING_ALERTS_FILE, post = postToDiscord } = {}) {
+async function postPendingAlerts({ token = getDiscordToken(), channelId = getChannelId(), pendingFile = PENDING_ALERTS_FILE, post = postToDiscord, acquire = acquireLock } = {}) {
   if (!token) throw new Error('No Discord token found')
   if (!channelId) throw new Error('No Discord channel configured — set discord.alerts_channel in config.json')
 
-  if (!fs.existsSync(pendingFile)) return { chunksPosted: 0, remaining: [], reason: 'missing-pending-file' }
+  const release = acquire()
+  try {
+    if (!fs.existsSync(pendingFile)) return { chunksPosted: 0, remaining: [], reason: 'missing-pending-file' }
 
-  let tweets = JSON.parse(fs.readFileSync(pendingFile, 'utf8'))
-  if (!Array.isArray(tweets)) tweets = []
-  if (tweets.length === 0) return { chunksPosted: 0, remaining: [], reason: 'empty-pending-file' }
+    let tweets = JSON.parse(fs.readFileSync(pendingFile, 'utf8'))
+    if (!Array.isArray(tweets)) tweets = []
+    if (tweets.length === 0) return { chunksPosted: 0, remaining: [], reason: 'empty-pending-file' }
 
-  const chunks = buildChunks(tweets)
-  let remaining = [...tweets]
+    const chunks = buildChunks(tweets)
+    let remaining = [...tweets]
 
-  for (let index = 0; index < chunks.length; index++) {
-    const { text, tweets: chunkTweets } = chunks[index]
-    await post(token, channelId, text)
-    const sentUrls = new Set(chunkTweets.map(tweet => tweet.url))
-    remaining = remaining.filter(tweet => !sentUrls.has(tweet.url))
-    fs.writeFileSync(pendingFile, JSON.stringify(remaining), 'utf8')
+    for (let index = 0; index < chunks.length; index++) {
+      const { text, tweets: chunkTweets } = chunks[index]
+      await post(token, channelId, text)
+      const sentUrls = new Set(chunkTweets.map(tweet => tweet.url))
+      remaining = remaining.filter(tweet => !sentUrls.has(tweet.url))
+      atomicWriteJson(pendingFile, remaining)
+    }
+
+    return { chunksPosted: chunks.length, remaining }
+  } finally {
+    release()
   }
-
-  return { chunksPosted: chunks.length, remaining }
 }
 
 async function main() {
@@ -178,50 +203,55 @@ async function main() {
   }
   console.log(`Discord channel: ${channelId}`)
 
-  if (!fs.existsSync(PENDING_ALERTS_FILE)) {
-    console.log('pending_alerts.json not found — nothing to post')
-    process.exit(0)
-  }
-
-  let tweets
+  const release = acquireLock()
   try {
-    tweets = JSON.parse(fs.readFileSync(PENDING_ALERTS_FILE, 'utf8'))
-    if (!Array.isArray(tweets)) tweets = []
-  } catch (e) {
-    console.error('Failed to parse pending_alerts.json:', e.message)
-    process.exit(1)
-  }
+    if (!fs.existsSync(PENDING_ALERTS_FILE)) {
+      console.log('pending_alerts.json not found — nothing to post')
+      process.exit(0)
+    }
 
-  console.log(`Pending alerts: ${tweets.length}`)
-  if (tweets.length === 0) {
-    console.log('No pending alerts — silent exit')
-    process.exit(0)
-  }
-
-  const chunks = buildChunks(tweets)
-  console.log(`Built ${chunks.length} Discord chunk(s) from ${tweets.length} tweet(s)`)
-
-  let remaining = [...tweets]
-  for (let index = 0; index < chunks.length; index++) {
-    const { text, tweets: chunkTweets } = chunks[index]
-    console.log(`Posting chunk ${index + 1}/${chunks.length} (${text.length} chars, ${chunkTweets.length} tweet(s))`)
+    let tweets
     try {
-      await postToDiscord(token, channelId, text)
-      const sentUrls = new Set(chunkTweets.map(tweet => tweet.url))
-      remaining = remaining.filter(tweet => !sentUrls.has(tweet.url))
-      fs.writeFileSync(PENDING_ALERTS_FILE, JSON.stringify(remaining), 'utf8')
-      console.log(`  chunk ${index + 1} OK — ${remaining.length} alert(s) still pending`)
+      tweets = JSON.parse(fs.readFileSync(PENDING_ALERTS_FILE, 'utf8'))
+      if (!Array.isArray(tweets)) tweets = []
     } catch (e) {
-      console.error(`Discord post failed on chunk ${index + 1}/${chunks.length}: ${e.message}`)
-      console.error(`pending_alerts.json preserved with ${remaining.length} tweet(s) — fix the error and retry`)
+      console.error('Failed to parse pending_alerts.json:', e.message)
       process.exit(1)
     }
-  }
 
-  console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
+    console.log(`Pending alerts: ${tweets.length}`)
+    if (tweets.length === 0) {
+      console.log('No pending alerts — silent exit')
+      process.exit(0)
+    }
+
+    const chunks = buildChunks(tweets)
+    console.log(`Built ${chunks.length} Discord chunk(s) from ${tweets.length} tweet(s)`)
+
+    let remaining = [...tweets]
+    for (let index = 0; index < chunks.length; index++) {
+      const { text, tweets: chunkTweets } = chunks[index]
+      console.log(`Posting chunk ${index + 1}/${chunks.length} (${text.length} chars, ${chunkTweets.length} tweet(s))`)
+      try {
+        await postToDiscord(token, channelId, text)
+        const sentUrls = new Set(chunkTweets.map(tweet => tweet.url))
+        remaining = remaining.filter(tweet => !sentUrls.has(tweet.url))
+        atomicWriteJson(PENDING_ALERTS_FILE, remaining)
+        console.log(`  chunk ${index + 1} OK — ${remaining.length} alert(s) still pending`)
+      } catch (e) {
+        console.error(`Discord post failed on chunk ${index + 1}/${chunks.length}: ${e.message}`)
+        console.error(`pending_alerts.json preserved with ${remaining.length} tweet(s) — fix the error and retry`)
+        process.exit(1)
+      }
+    }
+
+    console.log(`Done: ${chunks.length} message(s) posted, pending_alerts.json cleared`)
+  } finally {
+    release()
+  }
 }
 
-module.exports = { buildMessage, buildChunks, tweetLine, getChannelId, postToDiscord, postPendingAlerts }
+module.exports = { buildMessage, buildChunks, tweetLine, getChannelId, postToDiscord, postPendingAlerts, acquireLock, atomicWriteJson }
 
 if (require.main === module) {
   main().catch(error => {

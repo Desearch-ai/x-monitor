@@ -107,7 +107,7 @@ node post-to-discord.cjs
 
 ### 6. Enable cron
 
-Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours, posts to #x-alerts.
+Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours for passive ingestion only. Live X actions remain in `x-engage` and stay behind manual approval.
 
 ## Runtime Behavior
 
@@ -120,17 +120,19 @@ Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours, post
 4. tags tweets with monitor metadata such as source, bucket, lanes, route hints, importance, and context
 5. skips already seen tweet IDs using `state.json`
 6. writes all fetched tweets into `tweets_window.json`, pruned to the last 24 hours
-7. writes newly detected tweets into `pending_alerts.json`
-8. prints a JSON payload with stats, new tweets, and source-specific errors
+7. writes newly detected tweets into `pending_alerts.json` using atomic replace semantics
+8. exits with a compact `skipped` payload instead of overlapping when another run already holds `.monitor.lock`
+9. prints a JSON payload with stats, new tweets, and source-specific errors
 
 ### Cron behavior
 
-The intended production cadence is every 2 hours. `CRON_PROMPT.md` describes the expected automation flow:
-- run `monitor.py`
-- exit silently when `total_new == 0`
-- post new alerts to Discord channel `1477727527618347340`
-- optionally pipe the output into `feishu_digest.py` when Feishu credentials are configured
-- report compact source failures when any monitored source errors
+The intended production cadence is:
+- every 2 hours: `monitor.py` then `post-to-discord.cjs`
+- every 4 hours: `x-engage/run-engage.sh analyze` (separate repo)
+- manual approval review before any live action
+- optional/manual live execution only after approval
+
+`CRON_PROMPT.md` documents the passive monitor job. The monitor path now uses `.monitor.lock` plus a shared `.pending-alerts.lock` so collection and Discord posting cannot corrupt or resurrect queued alerts.
 
 ### Runtime files
 
