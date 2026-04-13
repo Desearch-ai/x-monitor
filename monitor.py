@@ -18,10 +18,12 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
 import os
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -30,7 +32,38 @@ STATE_FILE = SCRIPT_DIR / "state.json"
 CONFIG_FILE = SCRIPT_DIR / "config.json"
 WINDOW_FILE = SCRIPT_DIR / "tweets_window.json"
 PENDING_ALERTS_FILE = SCRIPT_DIR / "pending_alerts.json"
+MONITOR_LOCK_FILE = SCRIPT_DIR / ".monitor.lock"
+PENDING_ALERTS_LOCK_FILE = SCRIPT_DIR / ".pending-alerts.lock"
 DESEARCH_SCRIPT = Path.home() / ".openclaw/workspace/skills/desearch-x-search/scripts/desearch.py"
+
+
+def atomic_write_json(path: Path, data) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "w",
+        dir=path.parent,
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        delete=False,
+        encoding="utf-8",
+    ) as tmp:
+        json.dump(data, tmp, indent=2, ensure_ascii=False)
+        tmp.write("\n")
+        tmp_path = Path(tmp.name)
+    tmp_path.replace(path)
+
+
+def acquire_lock(lock_path: Path):
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("w")
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        handle.close()
+        raise RuntimeError(f"monitor already running, lock held at {lock_path}")
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
 
 
 def load_state() -> dict:
@@ -43,7 +76,7 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    atomic_write_json(STATE_FILE, state)
 
 
 def load_window() -> list:
@@ -88,7 +121,7 @@ def save_window(tweets: list):
 
         deduped.append(t)
 
-    WINDOW_FILE.write_text(json.dumps(deduped, indent=2, ensure_ascii=False))
+    atomic_write_json(WINDOW_FILE, deduped)
     return len(deduped)
 
 
@@ -132,15 +165,14 @@ def resolve_lanes(account_or_kw: dict, bucket: str, config: dict) -> list[str]:
     explicit = account_or_kw.get("lanes", [])
     if explicit:
         return explicit
-    
-    # Fallback to bucket mapping
+
     bucket_to_lanes = {}
     for lane_def in config.get("lanes", []):
         for b in lane_def.get("buckets", []):
             if b not in bucket_to_lanes:
                 bucket_to_lanes[b] = []
             bucket_to_lanes[b].append(lane_def["id"])
-    
+
     return bucket_to_lanes.get(bucket, [])
 
 
@@ -256,7 +288,7 @@ def parse_twitter_date(s: str) -> str | None:
 def normalize_tweet(tweet: dict, source: str, bucket: str, importance: str, context: str, lanes: list, route_hints: list) -> dict:
     """
     Add v2 monitor metadata to a tweet dict.
-    
+
     New v2 fields:
     - _monitor_source: source identifier
     - _monitor_bucket: watchlist bucket
@@ -268,12 +300,12 @@ def normalize_tweet(tweet: dict, source: str, bucket: str, importance: str, cont
     """
     tweet["_monitor_source"] = source
     tweet["_monitor_bucket"] = bucket
-    tweet["_monitor_category"] = bucket  # backward compat
+    tweet["_monitor_category"] = bucket
     tweet["_monitor_importance"] = importance
     tweet["_monitor_context"] = context
     tweet["_monitor_lanes"] = lanes
     tweet["_monitor_route_hints"] = route_hints
-    
+
     ca = tweet.get("created_at", "")
     if ca and not ca[0].isdigit():
         iso = parse_twitter_date(ca)
@@ -289,178 +321,182 @@ def main():
     parser.add_argument("--lane-filter", type=str, default=None, help="Only emit tweets for this lane (founder|brand)")
     args = parser.parse_args()
 
-    load_env()
-    config = load_config()
-    state = load_state() if not args.reset else {"seen_ids": {}, "last_run": None}
+    lock_handle = None
+    if not args.dry_run:
+        try:
+            lock_handle = acquire_lock(MONITOR_LOCK_FILE)
+        except RuntimeError as exc:
+            print(json.dumps({"status": "skipped", "reason": str(exc), "lock_file": str(MONITOR_LOCK_FILE)}, indent=2))
+            sys.exit(0)
 
-    seen_ids: dict = state.get("seen_ids", {})
-    new_tweets: list = []
-    all_window_tweets: list = []
-    errors: list = []
-    stats: dict = {"accounts_checked": 0, "keywords_checked": 0, "total_fetched": 0, "lanes_routed": {}}
+    try:
+        load_env()
+        config = load_config()
+        state = load_state() if not args.reset else {"seen_ids": {}, "last_run": None}
 
-    global_filters = config.get("filters", {})
+        seen_ids: dict = state.get("seen_ids", {})
+        new_tweets: list = []
+        all_window_tweets: list = []
+        errors: list = []
+        stats: dict = {"accounts_checked": 0, "keywords_checked": 0, "total_fetched": 0, "lanes_routed": {}}
 
-    # Pre-compute bucket -> lanes mapping
-    bucket_to_lanes: dict[str, list[str]] = {}
-    bucket_to_route_hints: dict[str, list[str]] = {}
-    for lane_def in config.get("lanes", []):
-        lane_id = lane_def["id"]
-        route_hint = lane_def.get("route_hint", "")
-        for bucket in lane_def.get("buckets", []):
-            if bucket not in bucket_to_lanes:
-                bucket_to_lanes[bucket] = []
-            bucket_to_lanes[bucket].append(lane_id)
-            if route_hint:
-                if bucket not in bucket_to_route_hints:
-                    bucket_to_route_hints[bucket] = []
-                bucket_to_route_hints[bucket].append(route_hint)
+        global_filters = config.get("filters", {})
 
-    def resolve_lanes_for_item(account_or_kw: dict, bucket: str) -> list[str]:
-        explicit = account_or_kw.get("lanes", [])
-        if explicit:
-            return explicit
-        return bucket_to_lanes.get(bucket, [])
+        bucket_to_lanes: dict[str, list[str]] = {}
+        bucket_to_route_hints: dict[str, list[str]] = {}
+        for lane_def in config.get("lanes", []):
+            lane_id = lane_def["id"]
+            route_hint = lane_def.get("route_hint", "")
+            for bucket in lane_def.get("buckets", []):
+                if bucket not in bucket_to_lanes:
+                    bucket_to_lanes[bucket] = []
+                bucket_to_lanes[bucket].append(lane_id)
+                if route_hint:
+                    if bucket not in bucket_to_route_hints:
+                        bucket_to_route_hints[bucket] = []
+                    bucket_to_route_hints[bucket].append(route_hint)
 
-    def resolve_hints_for_item(lanes: list[str]) -> list[str]:
-        hints = []
-        for lane_id in lanes:
-            hint = get_route_hint_for_lane(lane_id, config)
-            if hint:
-                hints.append(hint)
-        return hints
+        def resolve_lanes_for_item(account_or_kw: dict, bucket: str) -> list[str]:
+            explicit = account_or_kw.get("lanes", [])
+            if explicit:
+                return explicit
+            return bucket_to_lanes.get(bucket, [])
 
-    # Monitor accounts
-    for account in config.get("accounts", []):
-        username = account["username"]
-        bucket = account.get("bucket", "general")
-        key = f"timeline:{username}"
-        seen = set(seen_ids.get(key, []))
+        def resolve_hints_for_item(lanes: list[str]) -> list[str]:
+            hints = []
+            for lane_id in lanes:
+                hint = get_route_hint_for_lane(lane_id, config)
+                if hint:
+                    hints.append(hint)
+            return hints
 
-        tweets, err = get_timeline(username, count=50)
-        stats["accounts_checked"] += 1
+        for account in config.get("accounts", []):
+            username = account["username"]
+            bucket = account.get("bucket", "general")
+            key = f"timeline:{username}"
+            seen = set(seen_ids.get(key, []))
 
-        if err:
-            errors.append({"source": f"@{username}", "error": err})
-            continue
+            tweets, err = get_timeline(username, count=50)
+            stats["accounts_checked"] += 1
 
-        new_for_account = []
-        new_ids = []
-        for tweet in tweets:
-            tid = str(tweet.get("id") or tweet.get("id_str") or "")
-            if not tid:
+            if err:
+                errors.append({"source": f"@{username}", "error": err})
                 continue
 
-            lanes = resolve_lanes_for_item(account, bucket)
-            route_hints = resolve_hints_for_item(lanes)
+            new_for_account = []
+            new_ids = []
+            for tweet in tweets:
+                tid = str(tweet.get("id") or tweet.get("id_str") or "")
+                if not tid:
+                    continue
 
-            t_copy = dict(tweet)
-            normalize_tweet(t_copy, f"account:{username}", bucket, account.get("importance", "normal"),
-                            account.get("context", ""), lanes, route_hints)
-            all_window_tweets.append(t_copy)
+                lanes = resolve_lanes_for_item(account, bucket)
+                route_hints = resolve_hints_for_item(lanes)
 
-            if tid in seen:
-                continue
-            stats["total_fetched"] += 1
+                t_copy = dict(tweet)
+                normalize_tweet(t_copy, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints)
+                all_window_tweets.append(t_copy)
 
-            if tweet.get("is_retweet") and not account.get("include_retweets", False):
+                if tid in seen:
+                    continue
+                stats["total_fetched"] += 1
+
+                if tweet.get("is_retweet") and not account.get("include_retweets", False):
+                    new_ids.append(tid)
+                    continue
+
+                if global_filters.get("skip_replies", True) and tweet.get("in_reply_to_status_id"):
+                    new_ids.append(tid)
+                    continue
+
+                if is_important_enough(tweet, account, global_filters):
+                    normalize_tweet(tweet, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints)
+                    new_for_account.append(tweet)
+
+                    for lane in lanes:
+                        stats["lanes_routed"][lane] = stats["lanes_routed"].get(lane, 0) + 1
+
                 new_ids.append(tid)
+
+            all_ids = list(seen) + new_ids
+            seen_ids[key] = all_ids[-500:]
+            new_tweets.extend(new_for_account)
+
+        for kw in config.get("keywords", []):
+            query = kw["query"]
+            bucket = kw.get("bucket", "keyword")
+            key = f"keyword:{query}"
+            seen = set(seen_ids.get(key, []))
+
+            tweets, err = search_keyword(query, count=25)
+            stats["keywords_checked"] += 1
+
+            if err:
+                errors.append({"source": f"keyword:{query}", "error": err})
                 continue
 
-            if global_filters.get("skip_replies", True) and tweet.get("in_reply_to_status_id"):
+            new_for_kw = []
+            new_ids = []
+            for tweet in tweets:
+                tid = str(tweet.get("id") or tweet.get("id_str") or "")
+                if not tid:
+                    continue
+
+                lanes = resolve_lanes_for_item(kw, bucket)
+                route_hints = resolve_hints_for_item(lanes)
+
+                t_copy = dict(tweet)
+                normalize_tweet(t_copy, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)
+                all_window_tweets.append(t_copy)
+
+                if tid in seen:
+                    continue
+                stats["total_fetched"] += 1
+
+                normalize_tweet(tweet, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)
+                new_for_kw.append(tweet)
                 new_ids.append(tid)
-                continue
-
-            if is_important_enough(tweet, account, global_filters):
-                normalize_tweet(tweet, f"account:{username}", bucket, account.get("importance", "normal"),
-                                account.get("context", ""), lanes, route_hints)
-                new_for_account.append(tweet)
 
                 for lane in lanes:
                     stats["lanes_routed"][lane] = stats["lanes_routed"].get(lane, 0) + 1
 
-            new_ids.append(tid)
+            all_ids = list(seen) + new_ids
+            seen_ids[key] = all_ids[-500:]
+            new_tweets.extend(new_for_kw)
 
-        all_ids = list(seen) + new_ids
-        seen_ids[key] = all_ids[-500:]
-        new_tweets.extend(new_for_account)
+        if args.lane_filter:
+            new_tweets = [t for t in new_tweets if args.lane_filter in t.get("_monitor_lanes", [])]
 
-    # Monitor keywords
-    for kw in config.get("keywords", []):
-        query = kw["query"]
-        bucket = kw.get("bucket", "keyword")
-        key = f"keyword:{query}"
-        seen = set(seen_ids.get(key, []))
+        if not args.dry_run:
+            state["seen_ids"] = seen_ids
+            state["last_run"] = datetime.now(timezone.utc).isoformat()
+            save_state(state)
 
-        tweets, err = search_keyword(query, count=25)
-        stats["keywords_checked"] += 1
+        output = {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "stats": stats,
+            "total_new": len(new_tweets),
+            "new_tweets": new_tweets,
+            "errors": errors,
+            "v2_lanes": [lane["id"] for lane in config.get("lanes", [])],
+        }
 
-        if err:
-            errors.append({"source": f"keyword:{query}", "error": err})
-            continue
+        if not args.dry_run:
+            existing_window = load_window()
+            merged = existing_window + all_window_tweets
+            window_count = save_window(merged)
+            output["window_updated"] = window_count
 
-        new_for_kw = []
-        new_ids = []
-        for tweet in tweets:
-            tid = str(tweet.get("id") or tweet.get("id_str") or "")
-            if not tid:
-                continue
+            with acquire_lock(PENDING_ALERTS_LOCK_FILE):
+                existing_pending = load_pending_alerts()
+                merged_pending = merge_pending_alerts(existing_pending, new_tweets)
+                atomic_write_json(PENDING_ALERTS_FILE, merged_pending)
+                output["pending_alerts"] = len(merged_pending)
 
-            lanes = resolve_lanes_for_item(kw, bucket)
-            route_hints = resolve_hints_for_item(lanes)
-
-            t_copy = dict(tweet)
-            normalize_tweet(t_copy, f"keyword:{query}", bucket, kw.get("importance", "high"),
-                            kw.get("context", ""), lanes, route_hints)
-            all_window_tweets.append(t_copy)
-
-            if tid in seen:
-                continue
-            stats["total_fetched"] += 1
-
-            normalize_tweet(tweet, f"keyword:{query}", bucket, kw.get("importance", "high"),
-                            kw.get("context", ""), lanes, route_hints)
-            new_for_kw.append(tweet)
-            new_ids.append(tid)
-
-            for lane in lanes:
-                stats["lanes_routed"][lane] = stats["lanes_routed"].get(lane, 0) + 1
-
-        all_ids = list(seen) + new_ids
-        seen_ids[key] = all_ids[-500:]
-        new_tweets.extend(new_for_kw)
-
-    # Filter by lane if requested
-    if args.lane_filter:
-        new_tweets = [t for t in new_tweets if args.lane_filter in t.get("_monitor_lanes", [])]
-
-    # Save state
-    if not args.dry_run:
-        state["seen_ids"] = seen_ids
-        state["last_run"] = datetime.now(timezone.utc).isoformat()
-        save_state(state)
-
-    output = {
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "stats": stats,
-        "total_new": len(new_tweets),
-        "new_tweets": new_tweets,
-        "errors": errors,
-        "v2_lanes": [lane["id"] for lane in config.get("lanes", [])],
-    }
-
-    if not args.dry_run:
-        existing_window = load_window()
-        merged = existing_window + all_window_tweets
-        window_count = save_window(merged)
-        output["window_updated"] = window_count
-
-        existing_pending = load_pending_alerts()
-        merged_pending = merge_pending_alerts(existing_pending, new_tweets)
-        PENDING_ALERTS_FILE.write_text(json.dumps(merged_pending, indent=2, ensure_ascii=False))
-        output["pending_alerts"] = len(merged_pending)
-
-    print(json.dumps(output, indent=2, ensure_ascii=False))
+        print(json.dumps(output, indent=2, ensure_ascii=False))
+    finally:
+        if lock_handle is not None:
+            lock_handle.close()
 
 
 if __name__ == "__main__":

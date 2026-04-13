@@ -1,67 +1,63 @@
-# X Monitor Cron Prompt
+# X Monitor Runtime Prompt
 
-This is used by the cron agentTurn job. Run every 2 hours.
+This job owns passive signal ingestion only. It must never perform live X account actions.
 
-## Task
+## Safe cadence
 
-You are the X (Twitter) monitor for Desearch AI. Run the monitor script and process results.
+- **Monitor ingestion:** every 2 hours
+- **Engagement analysis / queue refresh:** every 4 hours in `x-engage`
+- **Approval review:** manual, after the analysis digest lands in Discord
+- **Live execution:** manual or separately scheduled only after approval, never bundled into this monitor job
 
-### Step 1: Run the monitor
+## Production flow
 
-```bash
-cd /Users/giga/.openclaw/workspace/x-monitor && DESEARCH_API_KEY=$DESEARCH_API_KEY uv run python monitor.py
-```
-
-If DESEARCH_API_KEY is not set, check /Users/giga/.openclaw/workspace/x-monitor/config.json for notes, then stop with a warning.
-
-### Step 2: Process output
-
-If `total_new == 0`: do nothing, exit silently.
-
-If there are new tweets, group them by category and post to Discord channel **1477727527618347340** (#x-alerts).
-
-### Step 3: Discord formatting
-
-Post one message per category batch (not one per tweet). Use this format:
-
-**For HIGH importance:**
-```
-🔔 **X Monitor** | [Category Icon] [Category Name]
-
-@username · [engagement: ❤️N 🔄N]
-"tweet text (max 280 chars)"
-🔗 https://x.com/username/status/id
-[context note if helpful]
-```
-
-Category icons:
-- 🦾 bittensor
-- 🔍 desearch / brand  
-- 🤝 influencer
-- 🏆 competitor
-- ⚙️ system
-- 🤖 ai
-- #️⃣ keyword/subnet
-
-**For NORMAL importance:** batch 3-5 tweets per message, more compact.
-
-### Step 4: Save to Feishu (if doc_token configured)
-
-Read config.json to check feishu.doc_token AND feishu.app_id. If either is empty, skip this step silently.
-
-If both are configured, pipe the monitor output to the digest writer:
+### Step 1: collect signals
 
 ```bash
-cd /Users/giga/.openclaw/workspace/x-monitor && \
-  DESEARCH_API_KEY=$DESEARCH_API_KEY uv run python monitor.py | uv run python feishu_digest.py
+cd /Users/giga/projects/openclaw/x-monitor
+DESEARCH_API_KEY="$DESEARCH_API_KEY" uv run python monitor.py
 ```
 
-The digest writer (`feishu_digest.py`) will:
-- Authenticate with Feishu using app_id + app_secret
-- Format new tweets grouped by category (bittensor, brand, competitor, influencer, etc.)
-- Append a dated section to the Feishu doc
-- Exit silently if total_new == 0
+Behavior:
+- exits `0` with a JSON `skipped` payload if another monitor run already holds `.monitor.lock`
+- writes `state.json`, `tweets_window.json`, and `pending_alerts.json` with atomic replace semantics
+- preserves `pending_alerts.json` across partial downstream failures
 
-### Step 5: Handle errors
+### Step 2: post pending alerts to Discord
 
-If there are errors in the output, log one compact message to Discord mentioning which sources failed.
+Only run this step after `monitor.py` exits successfully.
+
+```bash
+cd /Users/giga/projects/openclaw/x-monitor
+node post-to-discord.cjs
+```
+
+Behavior:
+- exits safely if `pending_alerts.json` is missing or empty
+- serializes `pending_alerts.json` access with `.pending-alerts.lock`
+- removes only successfully posted chunks from `pending_alerts.json`
+- leaves unsent chunks queued for retry after any Discord/API failure
+
+### Step 3: optional Feishu digest
+
+Run only when `config.json` has Feishu credentials configured.
+
+```bash
+cd /Users/giga/projects/openclaw/x-monitor
+DESEARCH_API_KEY="$DESEARCH_API_KEY" uv run python monitor.py --dry-run | uv run python feishu_digest.py
+```
+
+## Dry-run / non-prod verification
+
+```bash
+cd /Users/giga/projects/openclaw/x-monitor
+DESEARCH_API_KEY="$DESEARCH_API_KEY" uv run python monitor.py --dry-run
+```
+
+Dry-run fetches and prints output without mutating `state.json`, `tweets_window.json`, or `pending_alerts.json`.
+
+## Failure handling
+
+- If `monitor.py` returns source errors, record the compact error list and retry on the next interval.
+- If `post-to-discord.cjs` fails mid-run, fix the Discord/token/channel issue, then rerun the same command. The remaining queue is preserved.
+- Never combine this cron with `x-engage` live execution. Approval stays human-first.
