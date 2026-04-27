@@ -66,13 +66,17 @@ export DESEARCH_API_KEY="your_key_from_console.desearch.ai"
 Optional, depending on which paths you use:
 - `OPENROUTER_API_KEY` for `summarize.py`
 - `DISCORD_BOT_TOKEN` when posting outside an OpenClaw-managed runtime
-- Feishu app credentials in `config.json` for digest export
+- `X_MONITOR_RUNTIME_PATH` when you want to point at an explicit Social OS runtime export instead of the default `~/projects/desearch/social-os/runtime/x-monitor.json` location
+- Feishu app credentials in `config.json` for digest export fallback
 
 ### Setup
 
 1. Copy `.env.example` into a local `.env`, or export the same keys in your shell.
-2. Review `config.json` and confirm the accounts, keyword queries, Discord channel, and Feishu settings.
-3. Run a dry run before enabling cron.
+2. In normal operation, let Social OS manage the runtime contract and expose either:
+   - `~/projects/desearch/social-os/runtime/x-monitor.json`, or
+   - an explicit path via `X_MONITOR_RUNTIME_PATH`.
+3. Keep `config.json` only as an emergency local fallback when the managed runtime export is unavailable.
+4. Run a dry run before enabling cron.
 
 ### 2. Test manually
 
@@ -115,7 +119,7 @@ Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours for p
 
 `monitor.py` is the collector. On each run it:
 1. loads `.env`
-2. reads monitored accounts, keyword queries, and filters from `config.json`
+2. loads the managed Social OS runtime contract/projection first, then falls back to local `config.json` only if no managed runtime export is available
 3. calls the shared Desearch X search script for timelines and keyword searches
 4. tags tweets with monitor metadata such as source, bucket, lanes, route hints, importance, and context
 5. skips already seen tweet IDs using `state.json`
@@ -164,8 +168,27 @@ From `.env.example`:
 - `DESEARCH_API_KEY`: required for timeline and search lookups
 - `OPENROUTER_API_KEY`: required for `summarize.py`
 - `DISCORD_BOT_TOKEN`: required for direct Discord posting unless the runtime provides a bot token automatically
+- `X_MONITOR_RUNTIME_PATH`: optional explicit path to a managed Social OS runtime JSON payload
 
-## Config shape (v2)
+### Managed runtime is the default
+
+`monitor.py` now resolves watchlists, bucket→lane routing, and route hints from the managed Social OS runtime before touching repo-local config. It accepts any of these JSON payloads:
+
+- the full Social OS runtime contract (`lanes`, `watchlists`, `services`, `defaults`)
+- a `social_runtime_configs` row export with the contract under `config`
+- a direct x-monitor projection payload (`lanes`, `accounts`, `keywords`, `filters`, `discord`)
+
+Lookup order:
+1. `X_MONITOR_RUNTIME_PATH`
+2. `SOCIAL_OS_X_MONITOR_PATH`
+3. `SOCIAL_OS_RUNTIME_PATH`
+4. `~/projects/desearch/social-os/runtime/x-monitor.json`
+5. `~/projects/desearch/social-os/runtime/social-os-x-runtime.json`
+6. repo-local `config.json` fallback
+
+If an explicit managed-runtime env path is set but missing, the monitor exits instead of silently drifting back to stale local routing.
+
+## Config shape (v2 fallback / legacy local recovery)
 
 ```json
 {
@@ -186,7 +209,7 @@ From `.env.example`:
 
 | File | Purpose |
 |---|---|
-| `config.json` | Lanes, accounts, keywords, Discord/Feishu settings |
+| `config.json` | Emergency fallback for lanes, accounts, keywords, and Discord/Feishu settings |
 | `monitor.py` | Collection entry point with dual-lane normalization |
 | `state.json` | Per-source seen-ID dedupe store |
 | `tweets_window.json` | Rolling 24h tweet cache |
@@ -206,7 +229,7 @@ Each normalized tweet includes:
 
 ## Feishu Digest
 
-Feishu export is optional. To enable it, populate these `config.json` keys:
+Feishu export is optional. To enable it, populate these `config.json` fallback keys:
 - `feishu.doc_token`
 - `feishu.app_id`
 - `feishu.app_secret`
