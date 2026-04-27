@@ -35,6 +35,16 @@ PENDING_ALERTS_FILE = SCRIPT_DIR / "pending_alerts.json"
 MONITOR_LOCK_FILE = SCRIPT_DIR / ".monitor.lock"
 PENDING_ALERTS_LOCK_FILE = SCRIPT_DIR / ".pending-alerts.lock"
 DESEARCH_SCRIPT = Path.home() / ".openclaw/workspace/skills/desearch-x-search/scripts/desearch.py"
+DEFAULT_DISCORD_CHANNEL = "1477727527618347340"
+MANAGED_RUNTIME_PATH_ENV_VARS = (
+    "X_MONITOR_RUNTIME_PATH",
+    "SOCIAL_OS_X_MONITOR_PATH",
+    "SOCIAL_OS_RUNTIME_PATH",
+)
+DEFAULT_MANAGED_RUNTIME_PATHS = (
+    Path.home() / "projects/desearch/social-os/runtime/x-monitor.json",
+    Path.home() / "projects/desearch/social-os/runtime/social-os-x-runtime.json",
+)
 
 
 def atomic_write_json(path: Path, data) -> None:
@@ -139,16 +149,267 @@ def load_env():
                     os.environ[k] = v
 
 
+def normalize_string(value: object, default: str = "") -> str:
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized if normalized else default
+    return default
+
+
+def normalize_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+
+    items: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        normalized = normalize_string(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        items.append(normalized)
+    return items
+
+
+def normalize_bool(value: object, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    return default
+
+
+def normalize_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def read_json_file(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return data
+
+
+def find_managed_runtime_path() -> Path | None:
+    for env_name in MANAGED_RUNTIME_PATH_ENV_VARS:
+        raw = os.environ.get(env_name, "").strip()
+        if not raw:
+            continue
+        path = Path(raw).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(
+                f"Managed runtime path from {env_name} does not exist: {path}"
+            )
+        return path
+
+    for candidate in DEFAULT_MANAGED_RUNTIME_PATHS:
+        path = candidate.expanduser()
+        if path.exists():
+            return path
+
+    return None
+
+
+def is_projection_shape(payload: dict) -> bool:
+    return all(key in payload for key in ("lanes", "accounts", "keywords"))
+
+
+def normalize_lane_projection(entry: dict) -> dict:
+    lane_id = normalize_string(entry.get("id"))
+    if not lane_id:
+        return {}
+    return {
+        "id": lane_id,
+        "name": normalize_string(entry.get("name"), lane_id),
+        "route_hint": normalize_string(entry.get("route_hint")),
+        "buckets": normalize_string_list(entry.get("buckets")),
+    }
+
+
+def normalize_account_projection(entry: dict) -> dict:
+    username = normalize_string(entry.get("username"))
+    if not username:
+        return {}
+    return {
+        "username": username,
+        "bucket": normalize_string(entry.get("bucket"), "general"),
+        "importance": normalize_string(entry.get("importance"), "high"),
+        "lanes": normalize_string_list(entry.get("lanes")),
+        "context": normalize_string(entry.get("context")),
+        "include_retweets": normalize_bool(entry.get("include_retweets")),
+    }
+
+
+def normalize_keyword_projection(entry: dict) -> dict:
+    query = normalize_string(entry.get("query"))
+    if not query:
+        return {}
+    return {
+        "query": query,
+        "bucket": normalize_string(entry.get("bucket"), "keyword"),
+        "importance": normalize_string(entry.get("importance"), "high"),
+        "lanes": normalize_string_list(entry.get("lanes")),
+        "context": normalize_string(entry.get("context")),
+    }
+
+
+def normalize_filters(filters: object) -> dict:
+    data = filters if isinstance(filters, dict) else {}
+    return {
+        "normal_importance_min_likes": normalize_int(data.get("normal_importance_min_likes", 0) or 0),
+        "skip_replies": normalize_bool(data.get("skip_replies")),
+        "skip_retweets_for_normal": normalize_bool(data.get("skip_retweets_for_normal")),
+    }
+
+
+def build_x_monitor_projection_from_contract(contract: dict) -> dict:
+    lanes = [
+        lane
+        for lane in (
+            normalize_lane_projection(entry)
+            for entry in contract.get("lanes", [])
+            if isinstance(entry, dict)
+        )
+        if lane
+    ]
+
+    accounts: list[dict] = []
+    keywords: list[dict] = []
+    for entry in contract.get("watchlists", []):
+        if not isinstance(entry, dict):
+            continue
+
+        kind = normalize_string(entry.get("kind"), "account")
+        base = {
+            "bucket": normalize_string(entry.get("bucket"), "general" if kind == "account" else "keyword"),
+            "importance": normalize_string(entry.get("importance"), "high"),
+            "lanes": normalize_string_list(entry.get("lanes")),
+            "context": normalize_string(entry.get("context")),
+        }
+
+        if kind == "keyword":
+            projected = normalize_keyword_projection({
+                "query": entry.get("value"),
+                **base,
+            })
+            if projected:
+                keywords.append(projected)
+            continue
+
+        projected = normalize_account_projection({
+            "username": entry.get("value"),
+            "include_retweets": entry.get("include_retweets"),
+            **base,
+        })
+        if projected:
+            accounts.append(projected)
+
+    service_settings: dict = {}
+    for service in contract.get("services", []):
+        if not isinstance(service, dict):
+            continue
+        if normalize_string(service.get("id")) == "x-monitor":
+            settings = service.get("settings")
+            if isinstance(settings, dict):
+                service_settings = settings
+            break
+
+    defaults = contract.get("defaults") if isinstance(contract.get("defaults"), dict) else {}
+    discord_channel = normalize_string(
+        service_settings.get("discord_channel_id") or defaults.get("discord_channel_id"),
+        DEFAULT_DISCORD_CHANNEL,
+    )
+
+    return {
+        "lanes": lanes,
+        "accounts": accounts,
+        "keywords": keywords,
+        "discord": {"alerts_channel": discord_channel},
+        "filters": normalize_filters(service_settings.get("filters")),
+    }
+
+
+def project_managed_runtime(payload: dict) -> dict | None:
+    for projection_key in ("xMonitor", "x_monitor"):
+        nested_projection = payload.get(projection_key)
+        if isinstance(nested_projection, dict):
+            projected = project_managed_runtime(nested_projection)
+            if projected:
+                return projected
+
+    nested_contract = payload.get("config")
+    if isinstance(nested_contract, dict):
+        projected = project_managed_runtime(nested_contract)
+        if projected:
+            return projected
+
+    if is_projection_shape(payload):
+        lanes = [
+            lane
+            for lane in (
+                normalize_lane_projection(entry)
+                for entry in payload.get("lanes", [])
+                if isinstance(entry, dict)
+            )
+            if lane
+        ]
+        accounts = [
+            account
+            for account in (
+                normalize_account_projection(entry)
+                for entry in payload.get("accounts", [])
+                if isinstance(entry, dict)
+            )
+            if account
+        ]
+        keywords = [
+            keyword
+            for keyword in (
+                normalize_keyword_projection(entry)
+                for entry in payload.get("keywords", [])
+                if isinstance(entry, dict)
+            )
+            if keyword
+        ]
+        discord = payload.get("discord") if isinstance(payload.get("discord"), dict) else {}
+        return {
+            "lanes": lanes,
+            "accounts": accounts,
+            "keywords": keywords,
+            "discord": {
+                "alerts_channel": normalize_string(discord.get("alerts_channel"), DEFAULT_DISCORD_CHANNEL),
+            },
+            "filters": normalize_filters(payload.get("filters")),
+        }
+
+    if isinstance(payload.get("watchlists"), list) and isinstance(payload.get("lanes"), list):
+        return build_x_monitor_projection_from_contract(payload)
+
+    return None
+
+
 def load_config() -> dict:
+    managed_runtime_path = find_managed_runtime_path()
+    if managed_runtime_path is not None:
+        managed_payload = read_json_file(managed_runtime_path)
+        projected = project_managed_runtime(managed_payload)
+        if projected is None:
+            raise ValueError(
+                f"Unsupported Social OS managed runtime payload in {managed_runtime_path}"
+            )
+        return projected
+
     return json.loads(CONFIG_FILE.read_text())
 
 
 def get_lane_for_bucket(bucket: str, config: dict) -> list[str]:
     """Determine which lanes a bucket belongs to based on config."""
-    lanes = []
+    lanes: list[str] = []
     for lane_def in config.get("lanes", []):
-        if bucket in lane_def.get("buckets", []):
-            lanes.append(lane_def["id"])
+        lane_id = lane_def.get("id")
+        if bucket in lane_def.get("buckets", []) and lane_id and lane_id not in lanes:
+            lanes.append(lane_id)
     return lanes
 
 
@@ -162,26 +423,18 @@ def get_route_hint_for_lane(lane_id: str, config: dict) -> str | None:
 
 def resolve_lanes(account_or_kw: dict, bucket: str, config: dict) -> list[str]:
     """Resolve lanes from config: prefer explicit lanes, fallback to bucket mapping."""
-    explicit = account_or_kw.get("lanes", [])
+    explicit = normalize_string_list(account_or_kw.get("lanes"))
     if explicit:
         return explicit
-
-    bucket_to_lanes = {}
-    for lane_def in config.get("lanes", []):
-        for b in lane_def.get("buckets", []):
-            if b not in bucket_to_lanes:
-                bucket_to_lanes[b] = []
-            bucket_to_lanes[b].append(lane_def["id"])
-
-    return bucket_to_lanes.get(bucket, [])
+    return get_lane_for_bucket(bucket, config)
 
 
 def resolve_route_hints(lanes: list[str], config: dict) -> list[str]:
     """Resolve route hints from lane definitions."""
-    hints = []
+    hints: list[str] = []
     for lane_id in lanes:
         hint = get_route_hint_for_lane(lane_id, config)
-        if hint:
+        if hint and hint not in hints:
             hints.append(hint)
     return hints
 
@@ -342,34 +595,6 @@ def main():
 
         global_filters = config.get("filters", {})
 
-        bucket_to_lanes: dict[str, list[str]] = {}
-        bucket_to_route_hints: dict[str, list[str]] = {}
-        for lane_def in config.get("lanes", []):
-            lane_id = lane_def["id"]
-            route_hint = lane_def.get("route_hint", "")
-            for bucket in lane_def.get("buckets", []):
-                if bucket not in bucket_to_lanes:
-                    bucket_to_lanes[bucket] = []
-                bucket_to_lanes[bucket].append(lane_id)
-                if route_hint:
-                    if bucket not in bucket_to_route_hints:
-                        bucket_to_route_hints[bucket] = []
-                    bucket_to_route_hints[bucket].append(route_hint)
-
-        def resolve_lanes_for_item(account_or_kw: dict, bucket: str) -> list[str]:
-            explicit = account_or_kw.get("lanes", [])
-            if explicit:
-                return explicit
-            return bucket_to_lanes.get(bucket, [])
-
-        def resolve_hints_for_item(lanes: list[str]) -> list[str]:
-            hints = []
-            for lane_id in lanes:
-                hint = get_route_hint_for_lane(lane_id, config)
-                if hint:
-                    hints.append(hint)
-            return hints
-
         for account in config.get("accounts", []):
             username = account["username"]
             bucket = account.get("bucket", "general")
@@ -390,8 +615,8 @@ def main():
                 if not tid:
                     continue
 
-                lanes = resolve_lanes_for_item(account, bucket)
-                route_hints = resolve_hints_for_item(lanes)
+                lanes = resolve_lanes(account, bucket, config)
+                route_hints = resolve_route_hints(lanes, config)
 
                 t_copy = dict(tweet)
                 normalize_tweet(t_copy, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints)
@@ -442,8 +667,8 @@ def main():
                 if not tid:
                     continue
 
-                lanes = resolve_lanes_for_item(kw, bucket)
-                route_hints = resolve_hints_for_item(lanes)
+                lanes = resolve_lanes(kw, bucket, config)
+                route_hints = resolve_route_hints(lanes, config)
 
                 t_copy = dict(tweet)
                 normalize_tweet(t_copy, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)

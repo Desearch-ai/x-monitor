@@ -1,7 +1,9 @@
-import unittest
 import json
+import os
+import tempfile
+import unittest
 from pathlib import Path
-import sys
+from unittest import mock
 import importlib.util
 
 # monitor.py lives at repo root, tests/ is a subdirectory of the repo root
@@ -26,6 +28,242 @@ class MonitorPendingAlertTests(unittest.TestCase):
 
         merged = monitor.merge_pending_alerts(existing, new_items)
         self.assertEqual([item['id'] for item in merged], ['1', '2', '3'])
+
+
+class ManagedRuntimeConfigTests(unittest.TestCase):
+    def make_runtime_contract(self):
+        return {
+            "key": "social-os:x-runtime",
+            "workspace": "social-os",
+            "platform": "x",
+            "version": 1,
+            "lanes": [
+                {
+                    "id": "founder",
+                    "name": "Founder Lane",
+                    "route_hint": "x-engage/founder",
+                    "buckets": ["bittensor", "builder"],
+                    "default_account_id": "personal"
+                },
+                {
+                    "id": "brand",
+                    "name": "Brand Lane",
+                    "route_hint": "x-engage/brand",
+                    "buckets": ["bittensor", "desearch", "subnet"],
+                    "default_account_id": "brand"
+                }
+            ],
+            "watchlists": [
+                {
+                    "id": "acct-const",
+                    "kind": "account",
+                    "value": "const",
+                    "bucket": "bittensor",
+                    "lanes": ["founder", "brand"],
+                    "importance": "high",
+                    "context": "Founder account",
+                    "include_retweets": False
+                },
+                {
+                    "id": "kw-desearch",
+                    "kind": "keyword",
+                    "value": "@desearch_ai",
+                    "bucket": "desearch",
+                    "lanes": ["brand"],
+                    "importance": "high",
+                    "context": "Brand mentions"
+                }
+            ],
+            "services": [
+                {
+                    "id": "x-monitor",
+                    "label": "X Monitor",
+                    "enabled": True,
+                    "settings": {
+                        "discord_channel_id": "1477727527618347340",
+                        "filters": {
+                            "normal_importance_min_likes": 3,
+                            "skip_replies": True,
+                            "skip_retweets_for_normal": False
+                        }
+                    }
+                }
+            ],
+            "defaults": {
+                "discord_channel_id": "1477727527618347340"
+            }
+        }
+
+    def write_json(self, path: Path, payload: dict):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_load_config_prefers_managed_social_os_contract(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            runtime_path = tmp_path / "social-runtime.json"
+            fallback_config_path = tmp_path / "config.json"
+
+            self.write_json(runtime_path, {"config": self.make_runtime_contract()})
+            self.write_json(
+                fallback_config_path,
+                {
+                    "lanes": [{"id": "fallback", "route_hint": "x-engage/fallback", "buckets": ["fallback"]}],
+                    "accounts": [{"username": "fallback_user", "bucket": "fallback", "lanes": ["fallback"]}],
+                    "keywords": [{"query": "fallback", "bucket": "fallback", "lanes": ["fallback"]}],
+                },
+            )
+
+            original_config_file = monitor.CONFIG_FILE
+            monitor.CONFIG_FILE = fallback_config_path
+            try:
+                with mock.patch.dict(os.environ, {"X_MONITOR_RUNTIME_PATH": str(runtime_path)}, clear=False):
+                    config = monitor.load_config()
+            finally:
+                monitor.CONFIG_FILE = original_config_file
+
+            self.assertEqual(
+                config["accounts"],
+                [
+                    {
+                        "username": "const",
+                        "bucket": "bittensor",
+                        "importance": "high",
+                        "lanes": ["founder", "brand"],
+                        "context": "Founder account",
+                        "include_retweets": False,
+                    }
+                ],
+            )
+            self.assertEqual(
+                config["keywords"],
+                [
+                    {
+                        "query": "@desearch_ai",
+                        "bucket": "desearch",
+                        "importance": "high",
+                        "lanes": ["brand"],
+                        "context": "Brand mentions",
+                    }
+                ],
+            )
+            self.assertEqual(
+                config["lanes"],
+                [
+                    {
+                        "id": "founder",
+                        "name": "Founder Lane",
+                        "route_hint": "x-engage/founder",
+                        "buckets": ["bittensor", "builder"],
+                    },
+                    {
+                        "id": "brand",
+                        "name": "Brand Lane",
+                        "route_hint": "x-engage/brand",
+                        "buckets": ["bittensor", "desearch", "subnet"],
+                    },
+                ],
+            )
+            self.assertEqual(config["discord"], {"alerts_channel": "1477727527618347340"})
+            self.assertEqual(
+                config["filters"],
+                {
+                    "normal_importance_min_likes": 3,
+                    "skip_replies": True,
+                    "skip_retweets_for_normal": False,
+                },
+            )
+
+    def test_load_config_accepts_xmonitor_projection_wrapper(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_path = Path(tmpdir) / "x-monitor-projection.json"
+            self.write_json(
+                runtime_path,
+                {
+                    "xMonitor": {
+                        "lanes": [
+                            {
+                                "id": "brand",
+                                "name": "Brand Lane",
+                                "route_hint": "x-engage/brand",
+                                "buckets": ["desearch"]
+                            }
+                        ],
+                        "accounts": [
+                            {
+                                "username": "desearch_ai",
+                                "bucket": "desearch",
+                                "importance": "high",
+                                "lanes": ["brand"],
+                                "context": "Brand account",
+                                "include_retweets": True
+                            }
+                        ],
+                        "keywords": [
+                            {
+                                "query": "#desearch",
+                                "bucket": "desearch",
+                                "importance": "high",
+                                "lanes": ["brand"],
+                                "context": "Brand hashtag"
+                            }
+                        ],
+                        "filters": {
+                            "normal_importance_min_likes": 1,
+                            "skip_replies": False,
+                            "skip_retweets_for_normal": False
+                        },
+                        "discord": {
+                            "alerts_channel": "1477727527618347340"
+                        }
+                    },
+                    "xEngage": {
+                        "x_accounts": []
+                    }
+                },
+            )
+
+            with mock.patch.dict(os.environ, {"X_MONITOR_RUNTIME_PATH": str(runtime_path)}, clear=False):
+                config = monitor.load_config()
+
+            self.assertEqual(config["accounts"][0]["username"], "desearch_ai")
+            self.assertEqual(config["keywords"][0]["query"], "#desearch")
+            self.assertEqual(monitor.resolve_route_hints(["brand"], config), ["x-engage/brand"])
+
+    def test_managed_contract_bucket_mapping_drives_lane_and_route_hints(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_path = Path(tmpdir) / "social-runtime.json"
+            contract = self.make_runtime_contract()
+            contract["watchlists"] = [
+                {
+                    "id": "acct-builder",
+                    "kind": "account",
+                    "value": "buildernews",
+                    "bucket": "bittensor",
+                    "importance": "high",
+                    "context": "No explicit lanes — should use managed bucket mapping",
+                    "include_retweets": False,
+                },
+                {
+                    "id": "kw-subnet",
+                    "kind": "keyword",
+                    "value": "subnet22",
+                    "bucket": "subnet",
+                    "importance": "high",
+                    "context": "Keyword lane should come from lane buckets",
+                },
+            ]
+            self.write_json(runtime_path, contract)
+
+            with mock.patch.dict(os.environ, {"X_MONITOR_RUNTIME_PATH": str(runtime_path)}, clear=False):
+                config = monitor.load_config()
+
+            account_lanes = monitor.resolve_lanes(config["accounts"][0], config["accounts"][0]["bucket"], config)
+            keyword_lanes = monitor.resolve_lanes(config["keywords"][0], config["keywords"][0]["bucket"], config)
+
+            self.assertEqual(account_lanes, ["founder", "brand"])
+            self.assertEqual(monitor.resolve_route_hints(account_lanes, config), ["x-engage/founder", "x-engage/brand"])
+            self.assertEqual(keyword_lanes, ["brand"])
+            self.assertEqual(monitor.resolve_route_hints(keyword_lanes, config), ["x-engage/brand"])
 
 
 class DualLaneMetadataTests(unittest.TestCase):
