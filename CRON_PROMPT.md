@@ -34,7 +34,8 @@ node post-to-discord.cjs
 
 Behavior:
 - exits safely if `pending_alerts.json` is missing or empty
-- serializes `pending_alerts.json` access with `.pending-alerts.lock`
+- serializes `pending_alerts.json` access with `.pending-alerts.lock`, respecting active locks and recovering stale dead locks
+- retries Discord 429/rate-limit responses with bounded `Retry-After`/`retry_after` backoff
 - removes only successfully posted chunks from `pending_alerts.json`
 - leaves unsent chunks queued for retry after any Discord/API failure
 
