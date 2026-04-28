@@ -2,7 +2,7 @@
 """
 X Monitor Summarizer — Reads tweets_window.json (sliding 24h window),
 filters to the requested time window, sends to OpenRouter for analysis,
-and posts the summary to Discord #x-alerts.
+and posts the summary to Discord #x-monitor.
 
 Usage:
     python3 summarize.py                  # summarize last 4h (default)
@@ -238,7 +238,7 @@ def main():
     print(full_message)
 
     if not args.dry_run:
-        # Post to Discord #x-alerts
+        # Post to Discord #x-monitor
         discord_channel = str((config.get("discord") or {}).get("alerts_channel", ""))
         ok = send_discord(full_message, discord_channel)
         if ok:
