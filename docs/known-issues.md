@@ -32,13 +32,7 @@ Impact: if Discord posting fails and the monitor runs again before the old queue
 
 Feishu export is optional and disabled by default because `config.json` ships with empty Feishu credentials.
 
-## 5. Cron prompt points at old workspace path
-
-**Status:** ⚠️ degraded
-
-`CRON_PROMPT.md` tells automation to run from `/Users/giga/.openclaw/workspace/x-monitor`, but the repo lives at `/Users/giga/projects/openclaw/x-monitor`. The described flow is correct but the path is stale.
-
-## 6. Cron prompt formatting does not match the actual Discord poster
+## 5. Cron prompt formatting does not match the actual Discord poster
 
 **Status:** ⚠️ degraded
 
@@ -46,16 +40,7 @@ Feishu export is optional and disabled by default because `config.json` ships wi
 
 Impact: operators should not assume the current live alert renderer follows the richer prompt format.
 
-## 7. Some helper-script tests expect exports that don't exist
-
-**Status:** ⚠️ degraded
-
-- `tests/test_post_to_discord.cjs` expects a `removeChunkTweets` export not present in production code
-- `tests/test_post_daily_stats.cjs` expects a `getChannelId` export not present in production code
-
-Tests and helper scripts are out of sync on these specific exports.
-
-## 8. `post-daily-stats.cjs` is less portable than the other Discord poster
+## 6. `post-daily-stats.cjs` is less portable than the other Discord poster
 
 **Status:** ⚠️ degraded
 
@@ -63,7 +48,7 @@ Tests and helper scripts are out of sync on these specific exports.
 
 Impact: daily stats posting is harder to reuse outside the current host setup.
 
-## 9. X search dependency lives outside the repo
+## 7. X search dependency lives outside the repo
 
 **Status:** ⚠️ degraded
 

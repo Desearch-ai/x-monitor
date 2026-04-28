@@ -146,6 +146,42 @@ test('postToDiscord retries 429 using retry_after before acknowledging success',
   }
 })
 
+test('postToDiscord bounds 429 retries and prefers Retry-After header seconds', async () => {
+  const originalRequest = https.request
+  const sleeps = []
+  let attempts = 0
+
+  https.request = (_opts, callback) => {
+    attempts += 1
+    const req = new EventEmitter()
+    req.write = () => {}
+    req.end = () => {
+      const res = new EventEmitter()
+      res.statusCode = 429
+      res.headers = { 'retry-after': '0.02' }
+      callback(res)
+      res.emit('data', JSON.stringify({ retry_after: 99 }))
+      res.emit('end')
+    }
+    return req
+  }
+
+  try {
+    await assert.rejects(
+      postToDiscord('token', 'channel', 'hello', {
+        maxAttempts: 2,
+        sleep: async ms => sleeps.push(ms)
+      }),
+      /Discord HTTP 429/
+    )
+
+    assert.equal(attempts, 2, '429 retry should stop at the configured attempt bound')
+    assert.deepEqual(sleeps, [20], 'Retry-After header should drive the wait before the final attempt')
+  } finally {
+    https.request = originalRequest
+  }
+})
+
 test('acquireLock respects active locks and safely recovers stale dead locks', () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xmon-lock-'))
   const activeLock = path.join(tmpDir, 'active.lock')
