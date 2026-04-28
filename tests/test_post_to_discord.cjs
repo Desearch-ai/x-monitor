@@ -3,7 +3,9 @@ const assert = require('node:assert/strict')
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const { buildChunks, postPendingAlerts } = require('../post-to-discord.cjs')
+const https = require('https')
+const { EventEmitter } = require('events')
+const { buildChunks, postPendingAlerts, postToDiscord, acquireLock } = require('../post-to-discord.cjs')
 
 function makeTweet(id, category = 'desearch', text = 'x'.repeat(160)) {
   return {
@@ -103,6 +105,63 @@ test('idempotent retry only posts unsent chunks after a mid-run failure', async 
   assert.ok(firstRunPosts.length >= 2)
   assert.ok(!retryPosts.includes(firstRunPosts[0]), 'retry must not re-send the already posted first chunk')
   assert.equal(JSON.parse(fs.readFileSync(pendingFile, 'utf8')).length, 0)
+
+  fs.rmSync(tmpDir, { recursive: true, force: true })
+})
+
+test('postToDiscord retries 429 using retry_after before acknowledging success', async () => {
+  const originalRequest = https.request
+  const sleeps = []
+  const statuses = [
+    { statusCode: 429, headers: {}, body: JSON.stringify({ retry_after: 0.05 }) },
+    { statusCode: 200, headers: {}, body: JSON.stringify({ id: 'message-1' }) }
+  ]
+
+  https.request = (_opts, callback) => {
+    const next = statuses.shift()
+    const req = new EventEmitter()
+    req.write = () => {}
+    req.end = () => {
+      const res = new EventEmitter()
+      res.statusCode = next.statusCode
+      res.headers = next.headers
+      callback(res)
+      res.emit('data', next.body)
+      res.emit('end')
+    }
+    return req
+  }
+
+  try {
+    const result = await postToDiscord('token', 'channel', 'hello', {
+      maxAttempts: 3,
+      sleep: async ms => sleeps.push(ms)
+    })
+
+    assert.equal(result.id, 'message-1')
+    assert.deepEqual(sleeps, [50])
+    assert.equal(statuses.length, 0)
+  } finally {
+    https.request = originalRequest
+  }
+})
+
+test('acquireLock respects active locks and safely recovers stale dead locks', () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xmon-lock-'))
+  const activeLock = path.join(tmpDir, 'active.lock')
+  const staleLock = path.join(tmpDir, 'stale.lock')
+
+  fs.mkdirSync(activeLock)
+  fs.writeFileSync(path.join(activeLock, 'lock.json'), JSON.stringify({ pid: process.pid, createdAt: new Date(0).toISOString() }), 'utf8')
+  assert.throws(() => acquireLock(activeLock, { staleMs: 1 }), /already running/)
+  assert.ok(fs.existsSync(activeLock), 'active lock must not be removed')
+
+  fs.mkdirSync(staleLock)
+  fs.writeFileSync(path.join(staleLock, 'lock.json'), JSON.stringify({ pid: 999999, createdAt: new Date(0).toISOString() }), 'utf8')
+  const release = acquireLock(staleLock, { staleMs: 1, now: () => Date.now() })
+  assert.ok(fs.existsSync(path.join(staleLock, 'lock.json')), 'recovered lock should be replaced with fresh metadata')
+  release()
+  assert.ok(!fs.existsSync(staleLock), 'release removes the lock acquired by this process')
 
   fs.rmSync(tmpDir, { recursive: true, force: true })
 })
