@@ -67,7 +67,7 @@ config.json (lanes + accounts + keywords)
                                       +--> summarize.py
                                       +--> saved output
 
-pending_alerts.json --> post-to-discord.cjs --> Discord #x-alerts
+pending_alerts.json --> post-to-discord.cjs --> Discord #x-monitor
 ```
 
 ## Normalization

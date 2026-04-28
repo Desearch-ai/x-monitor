@@ -1,6 +1,6 @@
 # X Monitor
 
-Automated X/Twitter monitoring for Desearch AI. This repo polls a fixed set of X accounts and search queries, deduplicates newly seen posts, stores a rolling 24 hour cache, and prepares alerts for Discord `#x-alerts`.
+Automated X/Twitter monitoring for Desearch AI. This repo polls a fixed set of X accounts and search queries, deduplicates newly seen posts, stores a rolling 24 hour cache, and prepares alerts for Discord `#x-monitor`.
 
 ## Purpose
 

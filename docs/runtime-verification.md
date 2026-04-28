@@ -23,7 +23,7 @@ node post-to-discord.cjs
 Observed verification output on the repaired flow:
 
 ```text
-Discord channel: 1477727527618347340
+Discord channel: 1498287725223215185
 Pending alerts: 1
 Built 1 Discord chunk(s) from 1 tweet(s)
 Posting chunk 1/1 (194 chars, 1 tweet(s))

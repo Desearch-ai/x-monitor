@@ -145,7 +145,7 @@ def build_report(hours: int) -> str:
 
 
 def post_to_discord(text: str):
-    """Post stats to Discord #x-alerts channel."""
+    """Post stats to Discord #x-monitor channel."""
     import urllib.request
     import urllib.parse
 

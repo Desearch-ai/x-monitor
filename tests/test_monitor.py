@@ -80,7 +80,7 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
                     "label": "X Monitor",
                     "enabled": True,
                     "settings": {
-                        "discord_channel_id": "1477727527618347340",
+                        "discord_channel_id": "1498287725223215185",
                         "filters": {
                             "normal_importance_min_likes": 3,
                             "skip_replies": True,
@@ -90,7 +90,7 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
                 }
             ],
             "defaults": {
-                "discord_channel_id": "1477727527618347340"
+                "discord_channel_id": "1498287725223215185"
             }
         }
 
@@ -163,7 +163,7 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
                     },
                 ],
             )
-            self.assertEqual(config["discord"], {"alerts_channel": "1477727527618347340"})
+            self.assertEqual(config["discord"], {"alerts_channel": "1498287725223215185"})
             self.assertEqual(
                 config["filters"],
                 {
@@ -213,7 +213,7 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
                             "skip_retweets_for_normal": False
                         },
                         "discord": {
-                            "alerts_channel": "1477727527618347340"
+                            "alerts_channel": "1498287725223215185"
                         }
                     },
                     "xEngage": {
