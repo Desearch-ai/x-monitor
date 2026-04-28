@@ -36,5 +36,5 @@ Done: 1 message(s) posted, pending_alerts.json cleared
 - successful chunk: remove only that chunk's tweets from `pending_alerts.json`
 - failed chunk: leave the remaining queue untouched so the retry starts from the first unsent chunk
 - retry after partial success: does not duplicate already delivered chunks in Discord
-- Discord 429/rate-limit responses: retry with bounded `Retry-After`/`retry_after` backoff before failing the chunk
+- Discord 429/rate-limit responses: retry with bounded `Retry-After`/`retry_after` backoff before failing the chunk; default cron attempts are capped so a rate limit cannot hang forever
 - lock handling: active `.pending-alerts.lock` directories are respected; stale dead locks are recovered before cron posts
