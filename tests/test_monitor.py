@@ -31,6 +31,20 @@ class MonitorPendingAlertTests(unittest.TestCase):
 
 
 class ManagedRuntimeConfigTests(unittest.TestCase):
+    def setUp(self):
+        empty_live_env = {
+            name: ""
+            for name in (
+                *monitor.SUPABASE_URL_ENV_VARS,
+                *monitor.SUPABASE_ANON_KEY_ENV_VARS,
+            )
+        }
+        self.live_env_patcher = mock.patch.dict(os.environ, empty_live_env, clear=False)
+        self.live_env_patcher.start()
+
+    def tearDown(self):
+        self.live_env_patcher.stop()
+
     def make_runtime_contract(self):
         return {
             "key": "social-os:x-runtime",
@@ -96,6 +110,103 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
 
     def write_json(self, path: Path, payload: dict):
         path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def make_live_runtime_row(self):
+        return {
+            "id": "runtime-row-1",
+            "label": "default",
+            "watchlist_terms": ["desearch", "SN22"],
+            "watchlist_accounts": ["desearch_ai", "cosmicquantum"],
+            "lane_routing": {
+                "research": ["desearch_ai"],
+                "brand": ["cosmicquantum"],
+            },
+            "is_active": True,
+        }
+
+    def mocked_supabase_response(self, payload):
+        response = mock.Mock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        response.read.return_value = json.dumps(payload).encode("utf-8")
+        return response
+
+    def test_load_config_prefers_live_supabase_runtime_before_managed_file(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            runtime_path = tmp_path / "managed-runtime.json"
+            fallback_config_path = tmp_path / "config.json"
+            self.write_json(runtime_path, {"config": self.make_runtime_contract()})
+            self.write_json(
+                fallback_config_path,
+                {"accounts": [], "keywords": [], "lanes": []},
+            )
+
+            original_config_file = monitor.CONFIG_FILE
+            monitor.CONFIG_FILE = fallback_config_path
+            try:
+                with mock.patch.dict(
+                    os.environ,
+                    {
+                        "SOCIAL_OS_SUPABASE_URL": "https://example.supabase.co/rest/v1",
+                        "SOCIAL_OS_SUPABASE_ANON_KEY": "anon-key",
+                        "X_MONITOR_RUNTIME_PATH": str(runtime_path),
+                    },
+                    clear=False,
+                ), mock.patch(
+                    "monitor.urllib.request.urlopen",
+                    return_value=self.mocked_supabase_response([self.make_live_runtime_row()]),
+                ) as urlopen:
+                    config = monitor.load_config()
+            finally:
+                monitor.CONFIG_FILE = original_config_file
+
+            request = urlopen.call_args.args[0]
+            self.assertEqual(
+                request.full_url,
+                "https://example.supabase.co/rest/v1/social_runtime_configs?select=%2A&is_active=eq.true&order=updated_at.desc&limit=1",
+            )
+            self.assertEqual(request.get_header("Apikey"), "anon-key")
+            self.assertEqual(config["accounts"][0]["username"], "desearch_ai")
+            self.assertEqual(config["accounts"][0]["lanes"], ["research"])
+            self.assertEqual(config["accounts"][1]["username"], "cosmicquantum")
+            self.assertEqual(config["accounts"][1]["lanes"], ["brand"])
+            self.assertEqual(
+                [item["query"] for item in config["keywords"]],
+                ["desearch", "SN22"],
+            )
+            self.assertEqual([lane["id"] for lane in config["lanes"]], ["research", "brand"])
+            self.assertEqual(config["discord"], {"alerts_channel": "1498287725223215185"})
+            self.assertEqual(
+                config["filters"],
+                {
+                    "normal_importance_min_likes": 0,
+                    "skip_replies": False,
+                    "skip_retweets_for_normal": False,
+                },
+            )
+
+    def test_load_config_falls_back_to_managed_file_when_live_supabase_fetch_fails(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_path = Path(tmpdir) / "social-runtime.json"
+            self.write_json(runtime_path, {"config": self.make_runtime_contract()})
+
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "SOCIAL_OS_SUPABASE_URL": "https://example.supabase.co",
+                    "SOCIAL_OS_SUPABASE_ANON_KEY": "anon-key",
+                    "X_MONITOR_RUNTIME_PATH": str(runtime_path),
+                },
+                clear=False,
+            ), mock.patch(
+                "monitor.urllib.request.urlopen",
+                side_effect=OSError("network down"),
+            ):
+                config = monitor.load_config()
+
+            self.assertEqual(config["accounts"][0]["username"], "const")
+            self.assertEqual(config["keywords"][0]["query"], "@desearch_ai")
 
     def test_load_config_prefers_managed_social_os_contract(self):
         with tempfile.TemporaryDirectory() as tmpdir:

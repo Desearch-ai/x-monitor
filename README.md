@@ -168,23 +168,25 @@ From `.env.example`:
 - `DESEARCH_API_KEY`: required for timeline and search lookups
 - `OPENROUTER_API_KEY`: required for `summarize.py`
 - `DISCORD_BOT_TOKEN`: required for direct Discord posting unless the runtime provides a bot token automatically
+- `SOCIAL_OS_SUPABASE_URL` + `SOCIAL_OS_SUPABASE_ANON_KEY`: optional live Social OS Supabase runtime source; `SUPABASE_URL`/`SUPABASE_ANON_KEY` and `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` are also accepted
 - `X_MONITOR_RUNTIME_PATH`: optional explicit path to a managed Social OS runtime JSON payload
 
 ### Managed runtime is the default
 
-`monitor.py` now resolves watchlists, bucket→lane routing, and route hints from the managed Social OS runtime before touching repo-local config. It accepts any of these JSON payloads:
+`monitor.py` now resolves watchlists, bucket→lane routing, and route hints from the live active Social OS runtime row first, then managed runtime files before touching repo-local config. It accepts any of these JSON payloads:
 
 - the full Social OS runtime contract (`lanes`, `watchlists`, `services`, `defaults`)
 - a `social_runtime_configs` row export with the contract under `config`
 - a direct x-monitor projection payload (`lanes`, `accounts`, `keywords`, `filters`, `discord`)
 
 Lookup order:
-1. `X_MONITOR_RUNTIME_PATH`
-2. `SOCIAL_OS_X_MONITOR_PATH`
-3. `SOCIAL_OS_RUNTIME_PATH`
-4. `~/projects/desearch/social-os/runtime/x-monitor.json`
-5. `~/projects/desearch/social-os/runtime/social-os-x-runtime.json`
-6. repo-local `config.json` fallback
+1. Active Supabase `social_runtime_configs` row when a supported Supabase URL/key env pair is present
+2. `X_MONITOR_RUNTIME_PATH`
+3. `SOCIAL_OS_X_MONITOR_PATH`
+4. `SOCIAL_OS_RUNTIME_PATH`
+5. `~/projects/desearch/social-os/runtime/x-monitor.json`
+6. `~/projects/desearch/social-os/runtime/social-os-x-runtime.json`
+7. repo-local `config.json` fallback
 
 If an explicit managed-runtime env path is set but missing, the monitor exits instead of silently drifting back to stale local routing.
 

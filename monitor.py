@@ -24,6 +24,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -45,6 +48,17 @@ DEFAULT_MANAGED_RUNTIME_PATHS = (
     Path.home() / "projects/desearch/social-os/runtime/x-monitor.json",
     Path.home() / "projects/desearch/social-os/runtime/social-os-x-runtime.json",
 )
+SUPABASE_URL_ENV_VARS = (
+    "SOCIAL_OS_SUPABASE_URL",
+    "SUPABASE_URL",
+    "VITE_SUPABASE_URL",
+)
+SUPABASE_ANON_KEY_ENV_VARS = (
+    "SOCIAL_OS_SUPABASE_ANON_KEY",
+    "SUPABASE_ANON_KEY",
+    "VITE_SUPABASE_ANON_KEY",
+)
+SUPABASE_FETCH_TIMEOUT_SECONDS = 10
 
 
 def atomic_write_json(path: Path, data) -> None:
@@ -189,6 +203,138 @@ def read_json_file(path: Path) -> dict:
     if not isinstance(data, dict):
         raise ValueError(f"Expected JSON object in {path}")
     return data
+
+
+def first_env_value(names: tuple[str, ...]) -> str:
+    for name in names:
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value
+    return ""
+
+
+def normalize_supabase_rest_url(raw_url: str) -> str:
+    base_url = raw_url.strip().rstrip("/")
+    if base_url.endswith("/rest/v1"):
+        return base_url
+    return f"{base_url}/rest/v1"
+
+
+def build_social_runtime_config_url(raw_url: str) -> str:
+    query = urllib.parse.urlencode(
+        {
+            "select": "*",
+            "is_active": "eq.true",
+            "order": "updated_at.desc",
+            "limit": "1",
+        }
+    )
+    return f"{normalize_supabase_rest_url(raw_url)}/social_runtime_configs?{query}"
+
+
+def fetch_live_social_runtime_config_row() -> dict | None:
+    supabase_url = first_env_value(SUPABASE_URL_ENV_VARS)
+    anon_key = first_env_value(SUPABASE_ANON_KEY_ENV_VARS)
+    if not supabase_url or not anon_key:
+        return None
+
+    request = urllib.request.Request(
+        build_social_runtime_config_url(supabase_url),
+        headers={
+            "apikey": anon_key,
+            "Authorization": f"Bearer {anon_key}",
+            "Accept": "application/json",
+        },
+    )
+    try:
+        with urllib.request.urlopen(
+            request, timeout=SUPABASE_FETCH_TIMEOUT_SECONDS
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, urllib.error.URLError, json.JSONDecodeError, TimeoutError):
+        return None
+
+    if isinstance(payload, list) and payload and isinstance(payload[0], dict):
+        return payload[0]
+    if isinstance(payload, dict):
+        return payload
+    return None
+
+
+def lanes_for_account(handle: str, lane_routing: object) -> list[str]:
+    if not isinstance(lane_routing, dict):
+        return []
+
+    lanes: list[str] = []
+    for lane_id, handles in lane_routing.items():
+        normalized_lane = normalize_string(lane_id)
+        if not normalized_lane:
+            continue
+        normalized_handles = normalize_string_list(handles)
+        if handle in normalized_handles and normalized_lane not in lanes:
+            lanes.append(normalized_lane)
+    return lanes
+
+
+def project_social_runtime_config_row(row: dict) -> dict | None:
+    if any(isinstance(row.get(key), dict) for key in ("config", "xMonitor", "x_monitor")):
+        projected = project_managed_runtime(row)
+        if projected:
+            return projected
+
+    watchlist_terms = normalize_string_list(row.get("watchlist_terms"))
+    watchlist_accounts = normalize_string_list(row.get("watchlist_accounts"))
+    lane_routing = (
+        row.get("lane_routing") if isinstance(row.get("lane_routing"), dict) else {}
+    )
+    if not watchlist_terms and not watchlist_accounts and not lane_routing:
+        return None
+
+    lanes = [
+        {
+            "id": lane_id,
+            "name": lane_id.replace("_", " ").title(),
+            "route_hint": f"x-engage/{lane_id}",
+            "buckets": [],
+        }
+        for lane_id in normalize_string_list(list(lane_routing.keys()))
+    ]
+    accounts = [
+        {
+            "username": handle,
+            "bucket": "general",
+            "importance": "high",
+            "lanes": lanes_for_account(handle, lane_routing),
+            "context": "",
+            "include_retweets": False,
+        }
+        for handle in watchlist_accounts
+    ]
+    keywords = [
+        {
+            "query": term,
+            "bucket": "keyword",
+            "importance": "high",
+            "lanes": [],
+            "context": "",
+        }
+        for term in watchlist_terms
+    ]
+    return {
+        "lanes": lanes,
+        "accounts": accounts,
+        "keywords": keywords,
+        "discord": {"alerts_channel": DEFAULT_DISCORD_CHANNEL},
+        "filters": normalize_filters({}),
+    }
+
+
+def load_live_social_runtime_config() -> dict | None:
+    row = fetch_live_social_runtime_config_row()
+    if row is None:
+        return None
+    return project_social_runtime_config_row(row)
+
 
 
 def find_managed_runtime_path() -> Path | None:
@@ -390,6 +536,10 @@ def project_managed_runtime(payload: dict) -> dict | None:
 
 
 def load_config() -> dict:
+    live_runtime_config = load_live_social_runtime_config()
+    if live_runtime_config is not None:
+        return live_runtime_config
+
     managed_runtime_path = find_managed_runtime_path()
     if managed_runtime_path is not None:
         managed_payload = read_json_file(managed_runtime_path)
