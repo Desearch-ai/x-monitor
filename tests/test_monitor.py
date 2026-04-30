@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -12,6 +13,7 @@ MONITOR_PATH = REPO_ROOT / "monitor.py"
 
 spec = importlib.util.spec_from_file_location("monitor", MONITOR_PATH)
 monitor = importlib.util.module_from_spec(spec)
+sys.modules["monitor"] = monitor
 spec.loader.exec_module(monitor)
 
 
@@ -497,6 +499,159 @@ class ConfigStructureTests(unittest.TestCase):
 
         for lane in config["lanes"]:
             self.assertIn("route_hint", lane)
+
+
+class SocialRuntimeTelemetryTests(unittest.TestCase):
+    def sample_config(self):
+        return {
+            "lanes": [
+                {"id": "founder", "name": "Founder", "buckets": ["bittensor"], "route_hint": "x-engage/founder"},
+                {"id": "brand", "name": "Brand", "buckets": ["desearch"], "route_hint": "x-engage/brand"},
+            ],
+            "accounts": [
+                {"username": "const", "bucket": "bittensor", "lanes": ["founder"], "importance": "high", "context": "Founder account"},
+            ],
+            "keywords": [
+                {"query": "#desearch", "bucket": "desearch", "lanes": ["brand"], "importance": "high", "context": "Brand hashtag"},
+            ],
+        }
+
+    def test_input_snapshot_has_watchlists_route_summary_and_stable_hash(self):
+        config = self.sample_config()
+
+        snapshot = monitor.build_telemetry_input_snapshot(config)
+        fingerprint = monitor.config_fingerprint(snapshot)
+
+        self.assertEqual(snapshot["accounts"], ["const"])
+        self.assertEqual(snapshot["keywords"], ["#desearch"])
+        self.assertEqual(snapshot["counts"], {"accounts": 1, "keywords": 1, "lanes": 2})
+        self.assertEqual(snapshot["lane_summary"]["founder"], {"buckets": ["bittensor"], "route_hint": "x-engage/founder"})
+        self.assertEqual(len(fingerprint), 64)
+        self.assertEqual(fingerprint, monitor.config_fingerprint(json.loads(json.dumps(snapshot))))
+
+    def test_signal_metadata_is_representative_not_full_payload(self):
+        tweet = {
+            "id": "123",
+            "id_str": "123",
+            "text": "keep this out of telemetry",
+            "full_text": "also keep this out",
+            "url": "https://x.com/const/status/123",
+            "created_at": "2026-04-30T09:00:00+00:00",
+            "_monitor_source": "account:const",
+            "_monitor_bucket": "bittensor",
+            "_monitor_lanes": ["founder"],
+            "_monitor_route_hints": ["x-engage/founder"],
+            "_monitor_importance": "high",
+            "_monitor_context": "Founder account",
+        }
+
+        signals = monitor.build_representative_signal_metadata([tweet], limit=5)
+
+        self.assertEqual(signals, [{
+            "source": "account:const",
+            "bucket": "bittensor",
+            "lanes": ["founder"],
+            "route_hints": ["x-engage/founder"],
+            "importance": "high",
+            "context": "Founder account",
+            "tweet_id": "123",
+            "url": "https://x.com/const/status/123",
+            "timestamp": "2026-04-30T09:00:00+00:00",
+        }])
+        self.assertNotIn("text", signals[0])
+        self.assertNotIn("full_text", signals[0])
+
+    def test_runtime_event_payload_includes_input_output_and_signal_metadata(self):
+        config = self.sample_config()
+        started_at = "2026-04-30T09:00:00+00:00"
+        finished_at = "2026-04-30T09:00:05+00:00"
+        stats = {
+            "accounts_checked": 1,
+            "keywords_checked": 1,
+            "total_fetched": 3,
+            "new_count": 2,
+            "deduped_count": 1,
+            "emitted_count": 1,
+            "queued_count": 0,
+            "lanes_routed": {"founder": 1},
+        }
+        signal = monitor.normalize_tweet(
+            {"id": "123", "url": "https://x.com/const/status/123", "created_at": started_at},
+            "account:const",
+            "bittensor",
+            "high",
+            "Founder account",
+            ["founder"],
+            ["x-engage/founder"],
+        )
+
+        event = monitor.build_social_runtime_event(
+            lifecycle="finished",
+            status="success",
+            mode="dry-run",
+            run_id="run-1",
+            started_at=started_at,
+            finished_at=finished_at,
+            config=config,
+            stats=stats,
+            emitted_signals=[signal],
+            errors=[],
+            pending_alerts_count=None,
+        )
+
+        self.assertEqual(event["service"], "x-monitor")
+        self.assertEqual(event["event_type"], "info")
+        self.assertIn("finished", event["message"])
+        self.assertEqual(event["metadata"]["input"]["accounts"], ["const"])
+        self.assertEqual(event["metadata"]["output"]["accounts_checked"], 1)
+        self.assertEqual(event["metadata"]["output"]["duration_seconds"], 5.0)
+        self.assertEqual(event["metadata"]["output"]["representative_signals"][0]["source"], "account:const")
+
+    def test_emit_social_runtime_events_skips_without_credentials_and_does_not_call_network(self):
+        empty_env = {
+            name: ""
+            for name in (
+                *monitor.SUPABASE_URL_ENV_VARS,
+                *monitor.SUPABASE_ANON_KEY_ENV_VARS,
+            )
+        }
+        with mock.patch.dict(os.environ, empty_env, clear=False), mock.patch(
+            "monitor.urllib.request.urlopen"
+        ) as urlopen, mock.patch("sys.stderr") as stderr:
+            result = monitor.emit_social_runtime_events([{"service": "x-monitor", "event_type": "info", "message": "test", "metadata": {}}])
+
+        self.assertFalse(result)
+        urlopen.assert_not_called()
+        self.assertIn("Social OS telemetry skipped: missing Supabase URL/key", "".join(call.args[0] for call in stderr.write.call_args_list))
+
+    def test_emit_social_runtime_events_posts_batch_and_fails_soft(self):
+        response = mock.Mock()
+        response.__enter__ = mock.Mock(return_value=response)
+        response.__exit__ = mock.Mock(return_value=False)
+        response.status = 201
+        response.read.return_value = b""
+
+        with mock.patch.dict(
+            os.environ,
+            {"SOCIAL_OS_SUPABASE_URL": "https://example.supabase.co", "SOCIAL_OS_SUPABASE_ANON_KEY": "anon-key"},
+            clear=False,
+        ), mock.patch("monitor.urllib.request.urlopen", return_value=response) as urlopen:
+            self.assertTrue(monitor.emit_social_runtime_events([{"service": "x-monitor", "event_type": "info", "message": "test", "metadata": {}}]))
+
+        request = urlopen.call_args.args[0]
+        self.assertEqual(request.full_url, "https://example.supabase.co/rest/v1/social_runtime_events")
+        self.assertEqual(request.get_header("Apikey"), "anon-key")
+        self.assertEqual(request.get_header("Prefer"), "return=minimal")
+        self.assertEqual(json.loads(request.data.decode("utf-8"))[0]["service"], "x-monitor")
+
+        with mock.patch.dict(
+            os.environ,
+            {"SOCIAL_OS_SUPABASE_URL": "https://example.supabase.co", "SOCIAL_OS_SUPABASE_ANON_KEY": "anon-key"},
+            clear=False,
+        ), mock.patch("monitor.urllib.request.urlopen", side_effect=OSError("network down")), mock.patch("sys.stderr") as stderr:
+            self.assertFalse(monitor.emit_social_runtime_events([{"service": "x-monitor", "event_type": "info", "message": "test", "metadata": {}}]))
+
+        self.assertIn("Social OS telemetry failed", "".join(call.args[0] for call in stderr.write.call_args_list))
 
 
 if __name__ == '__main__':
