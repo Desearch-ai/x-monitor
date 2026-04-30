@@ -126,17 +126,30 @@ Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours for p
 6. writes all fetched tweets into `tweets_window.json`, pruned to the last 24 hours
 7. writes newly detected tweets into `pending_alerts.json` using atomic replace semantics
 8. exits with a compact `skipped` payload instead of overlapping when another run already holds `.monitor.lock`
-9. prints a JSON payload with stats, new tweets, and source-specific errors
+9. emits best-effort Social OS runtime telemetry (`service = x-monitor`) for started, finished, error, and lock-skipped lifecycle states when Supabase credentials are configured
+10. prints a JSON payload with stats, new tweets, source-specific errors, and whether Social OS telemetry insertion succeeded
 
 ### Cron behavior
 
 The intended production cadence is:
-- every 2 hours: `monitor.py` then `post-to-discord.cjs`
+- every 2 hours: `X_MONITOR_RUN_MODE=cron monitor.py` then `post-to-discord.cjs`
 - every 4 hours: `x-engage/run-engage.sh analyze` (separate repo)
 - manual approval review before any live action
 - optional/manual live execution only after approval
 
-`CRON_PROMPT.md` documents the passive monitor job. The monitor path now uses `.monitor.lock` plus a shared `.pending-alerts.lock` so collection and Discord posting cannot corrupt or resurrect queued alerts.
+Manual runs default to `mode = manual`; `--dry-run` reports `mode = dry-run`; cron can set `X_MONITOR_RUN_MODE=cron` so Social OS can separate scheduled collection from ad-hoc operator checks. `CRON_PROMPT.md` documents the passive monitor job. The monitor path now uses `.monitor.lock` plus a shared `.pending-alerts.lock` so collection and Discord posting cannot corrupt or resurrect queued alerts.
+
+### Social OS runtime telemetry
+
+When `SOCIAL_OS_SUPABASE_URL` plus a supported Supabase key are present, `monitor.py` writes compact rows to the existing `social_runtime_events` table with `service = x-monitor`. Telemetry is best-effort and fail-soft: insert failures are logged to stderr and never block collection, state updates, pending-alert writes, or normal JSON output.
+
+Each run emits operator-oriented lifecycle events:
+- `started`: run ID, mode, config fingerprint, monitored accounts/keywords, lane bucket summary, route hints, importance, and watchlist context
+- `finished`: started/finished timestamps, status, duration, accounts/keywords checked, total fetched, new/deduped/emitted/queued counts, lanes routed, pending-alert count when applicable, source-specific errors, and representative emitted signal metadata
+- `error`: same run context plus the fail-soft error payload before the exception exits
+- `skipped`: lock-skip visibility when another non-dry-run collection already holds `.monitor.lock`
+
+Representative signal telemetry intentionally includes only routing metadata plus tweet ID/url/timestamp when available. It does not dump full tweet payloads or text into Social OS runtime events. If credentials are absent, the monitor still runs and stderr clearly prints `Social OS telemetry skipped: missing Supabase URL/key ...`.
 
 ### Runtime files
 
@@ -168,7 +181,8 @@ From `.env.example`:
 - `DESEARCH_API_KEY`: required for timeline and search lookups
 - `OPENROUTER_API_KEY`: required for `summarize.py`
 - `DISCORD_BOT_TOKEN`: required for direct Discord posting unless the runtime provides a bot token automatically
-- `SOCIAL_OS_SUPABASE_URL` + `SOCIAL_OS_SUPABASE_ANON_KEY`: optional live Social OS Supabase runtime source; `SUPABASE_URL`/`SUPABASE_ANON_KEY` and `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` are also accepted
+- `SOCIAL_OS_SUPABASE_URL` + `SOCIAL_OS_SUPABASE_ANON_KEY`: optional live Social OS Supabase runtime source and runtime telemetry target. `SOCIAL_OS_SUPABASE_KEY`, `SUPABASE_URL`/`SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` aliases are also accepted. If no URL/key pair is configured, runtime telemetry is skipped with a clear stderr message and collection continues.
+- `X_MONITOR_RUN_MODE`: optional `cron` or `manual` telemetry mode override for non-dry-runs; `--dry-run` always reports `dry-run`
 - `X_MONITOR_RUNTIME_PATH`: optional explicit path to a managed Social OS runtime JSON payload
 
 ### Managed runtime is the default

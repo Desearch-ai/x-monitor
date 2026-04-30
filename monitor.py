@@ -19,6 +19,7 @@ Usage:
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import subprocess
@@ -54,11 +55,16 @@ SUPABASE_URL_ENV_VARS = (
     "VITE_SUPABASE_URL",
 )
 SUPABASE_ANON_KEY_ENV_VARS = (
+    "SOCIAL_OS_SUPABASE_KEY",
     "SOCIAL_OS_SUPABASE_ANON_KEY",
     "SUPABASE_ANON_KEY",
+    "SUPABASE_SERVICE_ROLE_KEY",
     "VITE_SUPABASE_ANON_KEY",
 )
 SUPABASE_FETCH_TIMEOUT_SECONDS = 10
+SUPABASE_WRITE_TIMEOUT_SECONDS = 5
+SOCIAL_RUNTIME_SERVICE = "x-monitor"
+REPRESENTATIVE_SIGNAL_LIMIT = 10
 
 
 def atomic_write_json(path: Path, data) -> None:
@@ -230,6 +236,277 @@ def build_social_runtime_config_url(raw_url: str) -> str:
         }
     )
     return f"{normalize_supabase_rest_url(raw_url)}/social_runtime_configs?{query}"
+
+
+def build_social_runtime_events_url(raw_url: str) -> str:
+    return f"{normalize_supabase_rest_url(raw_url)}/social_runtime_events"
+
+
+def stable_json_dumps(payload: object) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def config_fingerprint(payload: object) -> str:
+    return hashlib.sha256(stable_json_dumps(payload).encode("utf-8")).hexdigest()
+
+
+def build_telemetry_input_snapshot(config: dict | None) -> dict:
+    data = config if isinstance(config, dict) else {}
+    accounts = [
+        normalize_string(account.get("username"))
+        for account in data.get("accounts", [])
+        if isinstance(account, dict) and normalize_string(account.get("username"))
+    ]
+    keywords = [
+        normalize_string(keyword.get("query"))
+        for keyword in data.get("keywords", [])
+        if isinstance(keyword, dict) and normalize_string(keyword.get("query"))
+    ]
+
+    lane_summary: dict[str, dict] = {}
+    for lane in data.get("lanes", []):
+        if not isinstance(lane, dict):
+            continue
+        lane_id = normalize_string(lane.get("id"))
+        if not lane_id:
+            continue
+        lane_summary[lane_id] = {
+            "buckets": normalize_string_list(lane.get("buckets")),
+            "route_hint": normalize_string(lane.get("route_hint")),
+        }
+
+    watchlists: list[dict] = []
+    for account in data.get("accounts", []):
+        if not isinstance(account, dict):
+            continue
+        username = normalize_string(account.get("username"))
+        if not username:
+            continue
+        bucket = normalize_string(account.get("bucket"), "general")
+        lanes = resolve_lanes(account, bucket, data)
+        watchlists.append({
+            "kind": "account",
+            "value": username,
+            "bucket": bucket,
+            "lanes": lanes,
+            "route_hints": resolve_route_hints(lanes, data),
+            "importance": normalize_string(account.get("importance"), "high"),
+            "context": normalize_string(account.get("context")),
+        })
+
+    for keyword in data.get("keywords", []):
+        if not isinstance(keyword, dict):
+            continue
+        query = normalize_string(keyword.get("query"))
+        if not query:
+            continue
+        bucket = normalize_string(keyword.get("bucket"), "keyword")
+        lanes = resolve_lanes(keyword, bucket, data)
+        watchlists.append({
+            "kind": "keyword",
+            "value": query,
+            "bucket": bucket,
+            "lanes": lanes,
+            "route_hints": resolve_route_hints(lanes, data),
+            "importance": normalize_string(keyword.get("importance"), "high"),
+            "context": normalize_string(keyword.get("context")),
+        })
+
+    snapshot = {
+        "accounts": accounts,
+        "keywords": keywords,
+        "counts": {
+            "accounts": len(accounts),
+            "keywords": len(keywords),
+            "lanes": len(lane_summary),
+        },
+        "lane_summary": lane_summary,
+        "watchlists": watchlists,
+    }
+    snapshot["config_fingerprint"] = config_fingerprint(snapshot)
+    return snapshot
+
+
+def build_representative_signal_metadata(signals: list, limit: int = REPRESENTATIVE_SIGNAL_LIMIT) -> list[dict]:
+    representative: list[dict] = []
+    for signal in signals[:limit]:
+        if not isinstance(signal, dict):
+            continue
+        tweet_id = str(signal.get("id") or signal.get("id_str") or "").strip()
+        item = {
+            "source": normalize_string(signal.get("_monitor_source")),
+            "bucket": normalize_string(signal.get("_monitor_bucket") or signal.get("_monitor_category")),
+            "lanes": normalize_string_list(signal.get("_monitor_lanes")),
+            "route_hints": normalize_string_list(signal.get("_monitor_route_hints")),
+            "importance": normalize_string(signal.get("_monitor_importance")),
+            "context": normalize_string(signal.get("_monitor_context")),
+        }
+        if tweet_id:
+            item["tweet_id"] = tweet_id
+        url = normalize_string(signal.get("url") or signal.get("tweet_url") or signal.get("expanded_url"))
+        if url:
+            item["url"] = url
+        timestamp = normalize_string(signal.get("created_at") or signal.get("timestamp"))
+        if timestamp:
+            item["timestamp"] = timestamp
+        representative.append(item)
+    return representative
+
+
+def iso_duration_seconds(started_at: str | None, finished_at: str | None) -> float | None:
+    if not started_at or not finished_at:
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finished = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+        return round((finished - started).total_seconds(), 3)
+    except Exception:
+        return None
+
+
+def build_telemetry_output_summary(
+    *,
+    started_at: str,
+    finished_at: str | None,
+    status: str,
+    stats: dict | None,
+    emitted_signals: list | None,
+    errors: list | None,
+    pending_alerts_count: int | None,
+) -> dict:
+    stats_data = stats if isinstance(stats, dict) else {}
+    output = {
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "status": status,
+        "duration_seconds": iso_duration_seconds(started_at, finished_at),
+        "accounts_checked": normalize_int(stats_data.get("accounts_checked"), 0),
+        "keywords_checked": normalize_int(stats_data.get("keywords_checked"), 0),
+        "total_fetched": normalize_int(stats_data.get("total_fetched"), 0),
+        "new_count": normalize_int(stats_data.get("new_count"), 0),
+        "deduped_count": normalize_int(stats_data.get("deduped_count"), 0),
+        "emitted_count": normalize_int(stats_data.get("emitted_count"), 0),
+        "queued_count": normalize_int(stats_data.get("queued_count"), 0),
+        "lanes_routed": stats_data.get("lanes_routed") if isinstance(stats_data.get("lanes_routed"), dict) else {},
+        "source_errors": errors if isinstance(errors, list) else [],
+        "representative_signals": build_representative_signal_metadata(emitted_signals or []),
+    }
+    if pending_alerts_count is not None:
+        output["pending_alerts_count"] = pending_alerts_count
+    return output
+
+
+def build_social_runtime_event(
+    *,
+    lifecycle: str,
+    status: str,
+    mode: str,
+    run_id: str,
+    started_at: str,
+    finished_at: str | None = None,
+    config: dict | None = None,
+    stats: dict | None = None,
+    emitted_signals: list | None = None,
+    errors: list | None = None,
+    pending_alerts_count: int | None = None,
+    message: str | None = None,
+) -> dict:
+    source_errors = errors if isinstance(errors, list) else []
+    event_type = "info"
+    if lifecycle == "error" or status == "error":
+        event_type = "error"
+    elif lifecycle == "skipped" or source_errors:
+        event_type = "warn"
+
+    metadata = {
+        "run_id": run_id,
+        "lifecycle": lifecycle,
+        "status": status,
+        "mode": mode,
+        "input": build_telemetry_input_snapshot(config),
+        "output": build_telemetry_output_summary(
+            started_at=started_at,
+            finished_at=finished_at,
+            status=status,
+            stats=stats,
+            emitted_signals=emitted_signals,
+            errors=source_errors,
+            pending_alerts_count=pending_alerts_count,
+        ),
+    }
+    return {
+        "service": SOCIAL_RUNTIME_SERVICE,
+        "event_type": event_type,
+        "message": (message or f"x-monitor {lifecycle}: {status} ({mode})")[:500],
+        "metadata": metadata,
+        "created_at": finished_at or started_at,
+    }
+
+
+def emit_social_runtime_events(events: list[dict]) -> bool:
+    """Best-effort batch insert into Social OS social_runtime_events."""
+    if not events:
+        return False
+
+    supabase_url = first_env_value(SUPABASE_URL_ENV_VARS)
+    supabase_key = first_env_value(SUPABASE_ANON_KEY_ENV_VARS)
+    if not supabase_url or not supabase_key:
+        print(
+            "Social OS telemetry skipped: missing Supabase URL/key "
+            "(set SOCIAL_OS_SUPABASE_URL and SOCIAL_OS_SUPABASE_ANON_KEY)",
+            file=sys.stderr,
+        )
+        return False
+
+    rows: list[dict] = []
+    now = datetime.now(timezone.utc).isoformat()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        rows.append({
+            "service": normalize_string(event.get("service"), SOCIAL_RUNTIME_SERVICE),
+            "event_type": normalize_string(event.get("event_type"), "info"),
+            "message": normalize_string(event.get("message"), "x-monitor runtime event")[:500],
+            "metadata": event.get("metadata") if isinstance(event.get("metadata"), dict) else {},
+            "created_at": normalize_string(event.get("created_at"), now),
+        })
+    if not rows:
+        return False
+
+    request = urllib.request.Request(
+        build_social_runtime_events_url(supabase_url),
+        data=json.dumps(rows, ensure_ascii=False).encode("utf-8"),
+        method="POST",
+        headers={
+            "apikey": supabase_key,
+            "Authorization": f"Bearer {supabase_key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=minimal",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=SUPABASE_WRITE_TIMEOUT_SECONDS) as response:
+            status = getattr(response, "status", None) or response.getcode()
+            if int(status) >= 400:
+                raise OSError(f"HTTP {status}")
+        return True
+    except Exception as exc:
+        print(f"Social OS telemetry failed: {exc}", file=sys.stderr)
+        return False
+
+
+def resolve_run_mode(args: argparse.Namespace) -> str:
+    if getattr(args, "dry_run", False):
+        return "dry-run"
+    raw = os.environ.get("X_MONITOR_RUN_MODE", "").strip().lower()
+    if raw in {"cron", "manual"}:
+        return raw
+    return "manual"
+
+
+def new_run_id(started_at: str) -> str:
+    compact = started_at.replace("+00:00", "Z").replace(":", "").replace("-", "")
+    return f"x-monitor-{compact}-{os.getpid()}"
 
 
 def fetch_live_social_runtime_config_row() -> dict | None:
@@ -724,24 +1001,72 @@ def main():
     parser.add_argument("--lane-filter", type=str, default=None, help="Only emit tweets for this lane (founder|brand)")
     args = parser.parse_args()
 
+    load_env()
+    started_at = datetime.now(timezone.utc).isoformat()
+    run_id = new_run_id(started_at)
+    mode = resolve_run_mode(args)
+    config: dict | None = None
+    stats: dict = {
+        "accounts_checked": 0,
+        "keywords_checked": 0,
+        "total_fetched": 0,
+        "new_count": 0,
+        "deduped_count": 0,
+        "emitted_count": 0,
+        "queued_count": 0,
+        "lanes_routed": {},
+    }
+    errors: list = []
+    new_tweets: list = []
+    pending_alerts_count: int | None = None
+
     lock_handle = None
     if not args.dry_run:
         try:
             lock_handle = acquire_lock(MONITOR_LOCK_FILE)
         except RuntimeError as exc:
+            finished_at = datetime.now(timezone.utc).isoformat()
+            error_payload = [{"source": "lock", "error": str(exc)}]
+            emit_social_runtime_events([
+                build_social_runtime_event(
+                    lifecycle="skipped",
+                    status="skipped",
+                    mode=mode,
+                    run_id=run_id,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    config=None,
+                    stats=stats,
+                    emitted_signals=[],
+                    errors=error_payload,
+                    pending_alerts_count=None,
+                    message=f"x-monitor skipped: lock already held ({mode})",
+                )
+            ])
             print(json.dumps({"status": "skipped", "reason": str(exc), "lock_file": str(MONITOR_LOCK_FILE)}, indent=2))
             sys.exit(0)
 
     try:
-        load_env()
         config = load_config()
+        emit_social_runtime_events([
+            build_social_runtime_event(
+                lifecycle="started",
+                status="running",
+                mode=mode,
+                run_id=run_id,
+                started_at=started_at,
+                config=config,
+                stats=stats,
+                emitted_signals=[],
+                errors=[],
+                pending_alerts_count=None,
+            )
+        ])
+
         state = load_state() if not args.reset else {"seen_ids": {}, "last_run": None}
 
         seen_ids: dict = state.get("seen_ids", {})
-        new_tweets: list = []
         all_window_tweets: list = []
-        errors: list = []
-        stats: dict = {"accounts_checked": 0, "keywords_checked": 0, "total_fetched": 0, "lanes_routed": {}}
 
         global_filters = config.get("filters", {})
 
@@ -758,6 +1083,7 @@ def main():
                 errors.append({"source": f"@{username}", "error": err})
                 continue
 
+            stats["total_fetched"] += len(tweets)
             new_for_account = []
             new_ids = []
             for tweet in tweets:
@@ -773,8 +1099,9 @@ def main():
                 all_window_tweets.append(t_copy)
 
                 if tid in seen:
+                    stats["deduped_count"] += 1
                     continue
-                stats["total_fetched"] += 1
+                stats["new_count"] += 1
 
                 if tweet.get("is_retweet") and not account.get("include_retweets", False):
                     new_ids.append(tid)
@@ -810,6 +1137,7 @@ def main():
                 errors.append({"source": f"keyword:{query}", "error": err})
                 continue
 
+            stats["total_fetched"] += len(tweets)
             new_for_kw = []
             new_ids = []
             for tweet in tweets:
@@ -825,8 +1153,9 @@ def main():
                 all_window_tweets.append(t_copy)
 
                 if tid in seen:
+                    stats["deduped_count"] += 1
                     continue
-                stats["total_fetched"] += 1
+                stats["new_count"] += 1
 
                 normalize_tweet(tweet, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)
                 new_for_kw.append(tweet)
@@ -842,13 +1171,21 @@ def main():
         if args.lane_filter:
             new_tweets = [t for t in new_tweets if args.lane_filter in t.get("_monitor_lanes", [])]
 
+        stats["emitted_count"] = len(new_tweets)
         if not args.dry_run:
+            stats["queued_count"] = len(new_tweets)
             state["seen_ids"] = seen_ids
             state["last_run"] = datetime.now(timezone.utc).isoformat()
             save_state(state)
 
+        finished_at = datetime.now(timezone.utc).isoformat()
+        status = "finished_with_errors" if errors else "success"
         output = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": finished_at,
+            "started_at": started_at,
+            "finished_at": finished_at,
+            "status": status,
+            "duration_seconds": iso_duration_seconds(started_at, finished_at),
             "stats": stats,
             "total_new": len(new_tweets),
             "new_tweets": new_tweets,
@@ -866,9 +1203,48 @@ def main():
                 existing_pending = load_pending_alerts()
                 merged_pending = merge_pending_alerts(existing_pending, new_tweets)
                 atomic_write_json(PENDING_ALERTS_FILE, merged_pending)
-                output["pending_alerts"] = len(merged_pending)
+                pending_alerts_count = len(merged_pending)
+                output["pending_alerts"] = pending_alerts_count
+
+        telemetry_submitted = emit_social_runtime_events([
+            build_social_runtime_event(
+                lifecycle="finished",
+                status=status,
+                mode=mode,
+                run_id=run_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                config=config,
+                stats=stats,
+                emitted_signals=new_tweets,
+                errors=errors,
+                pending_alerts_count=pending_alerts_count,
+            )
+        ])
+        output["telemetry"] = {"social_os_events_submitted": telemetry_submitted}
 
         print(json.dumps(output, indent=2, ensure_ascii=False))
+    except Exception as exc:
+        finished_at = datetime.now(timezone.utc).isoformat()
+        errors = errors or []
+        errors.append({"source": "x-monitor", "error": str(exc)})
+        emit_social_runtime_events([
+            build_social_runtime_event(
+                lifecycle="error",
+                status="error",
+                mode=mode,
+                run_id=run_id,
+                started_at=started_at,
+                finished_at=finished_at,
+                config=config,
+                stats=stats,
+                emitted_signals=new_tweets,
+                errors=errors,
+                pending_alerts_count=pending_alerts_count,
+                message=f"x-monitor error: {str(exc)[:420]}",
+            )
+        ])
+        raise
     finally:
         if lock_handle is not None:
             lock_handle.close()
