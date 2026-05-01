@@ -188,6 +188,32 @@ class ManagedRuntimeConfigTests(unittest.TestCase):
                 },
             )
 
+
+    def test_live_runtime_projection_preserves_account_strategy_fields(self):
+        row = self.make_live_runtime_row()
+        row["account_filters"] = {
+            "desearch_ai": {
+                "positive": ["desearch", "SN22"],
+                "negative": ["scam", "rug pull"],
+                "goal": "Establish Desearch as the authoritative AI search API on SN22",
+            },
+            "cosmicquantum": {
+                "positive": ["founder", "build in public"],
+                "negative": ["buy now"],
+            },
+        }
+        row["account_goals"] = {
+            "cosmicquantum": "Build trust through authentic founder presence",
+        }
+
+        config = monitor.project_social_runtime_config_row(row)
+
+        self.assertEqual([item["query"] for item in config["keywords"]], ["desearch", "SN22"])
+        self.assertEqual(config["accounts"][0]["username"], "desearch_ai")
+        self.assertEqual(config["accounts"][0]["lanes"], ["research"])
+        self.assertEqual(config["account_filters"]["desearch_ai"]["positive"], ["desearch", "SN22"])
+        self.assertEqual(config["account_goals"], {"cosmicquantum": "Build trust through authentic founder presence"})
+
     def test_load_config_falls_back_to_managed_file_when_live_supabase_fetch_fails(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             runtime_path = Path(tmpdir) / "social-runtime.json"
@@ -547,17 +573,17 @@ class SocialRuntimeTelemetryTests(unittest.TestCase):
 
         signals = monitor.build_representative_signal_metadata([tweet], limit=5)
 
-        self.assertEqual(signals, [{
-            "source": "account:const",
-            "bucket": "bittensor",
-            "lanes": ["founder"],
-            "route_hints": ["x-engage/founder"],
-            "importance": "high",
-            "context": "Founder account",
-            "tweet_id": "123",
-            "url": "https://x.com/const/status/123",
-            "timestamp": "2026-04-30T09:00:00+00:00",
-        }])
+        self.assertEqual(signals[0]["source"], "account:const")
+        self.assertEqual(signals[0]["bucket"], "bittensor")
+        self.assertEqual(signals[0]["lanes"], ["founder"])
+        self.assertEqual(signals[0]["route_hints"], ["x-engage/founder"])
+        self.assertEqual(signals[0]["importance"], "high")
+        self.assertEqual(signals[0]["context"], "Founder account")
+        self.assertEqual(signals[0]["tweet_id"], "123")
+        self.assertEqual(signals[0]["url"], "https://x.com/const/status/123")
+        self.assertEqual(signals[0]["timestamp"], "2026-04-30T09:00:00+00:00")
+        self.assertEqual(signals[0]["collection_stage"], "raw_collected")
+        self.assertIn("eligible_accounts", signals[0])
         self.assertNotIn("text", signals[0])
         self.assertNotIn("full_text", signals[0])
 
@@ -606,6 +632,97 @@ class SocialRuntimeTelemetryTests(unittest.TestCase):
         self.assertEqual(event["metadata"]["output"]["accounts_checked"], 1)
         self.assertEqual(event["metadata"]["output"]["duration_seconds"], 5.0)
         self.assertEqual(event["metadata"]["output"]["representative_signals"][0]["source"], "account:const")
+
+
+    def test_account_eligibility_metadata_marks_candidates_without_full_text_leak(self):
+        config = self.sample_config()
+        config["account_filters"] = {
+            "desearch_ai": {
+                "positive": ["desearch", "SN22"],
+                "negative": ["scam"],
+                "goal": "Establish Desearch as the authoritative AI search API on SN22",
+            },
+            "cosmicquantum": {
+                "positive": ["founder"],
+                "negative": ["buy now"],
+                "goal": "Build trust through authentic founder presence",
+            },
+        }
+        tweet = monitor.normalize_tweet(
+            {"id": "123", "text": "Desearch SN22 update for developers", "created_at": "2026-04-30T09:00:00+00:00"},
+            "keyword:desearch",
+            "desearch",
+            "high",
+            "Brand mention",
+            ["brand"],
+            ["x-engage/brand"],
+            config=config,
+        )
+
+        metadata = monitor.build_representative_signal_metadata([tweet])[0]
+
+        self.assertEqual(metadata["collection_stage"], "raw_collected")
+        self.assertEqual(metadata["filter_stage"], "candidate")
+        self.assertEqual(metadata["eligible_accounts"], ["desearch_ai"])
+        self.assertEqual(metadata["account_goal_hint"], {"desearch_ai": "Establish Desearch as the authoritative AI search API on SN22"})
+        self.assertEqual(metadata["negative_filter_matches"], {})
+        self.assertIn("positive filter", metadata["signal_value_reason"])
+        self.assertNotIn("text", metadata)
+
+
+    def test_negative_filter_metadata_marks_unqualified_signal(self):
+        config = self.sample_config()
+        config["account_filters"] = {
+            "desearch_ai": {"positive": ["desearch"], "negative": ["scam"], "goal": "Brand authority"}
+        }
+        tweet = monitor.normalize_tweet(
+            {"id": "125", "text": "desearch scam bait", "created_at": "2026-04-30T09:00:00+00:00"},
+            "keyword:desearch",
+            "desearch",
+            "high",
+            "Brand hashtag",
+            ["brand"],
+            ["x-engage/brand"],
+            config=config,
+        )
+
+        metadata = monitor.build_representative_signal_metadata([tweet])[0]
+
+        self.assertEqual(metadata["filter_stage"], "unqualified")
+        self.assertEqual(metadata["eligible_accounts"], [])
+        self.assertEqual(metadata["negative_filter_matches"], {"desearch_ai": ["scam"]})
+        self.assertEqual(metadata["skipped_reason"], "negative_filter_match")
+
+    def test_runtime_event_output_distinguishes_raw_and_candidate_signal_counts(self):
+        config = self.sample_config()
+        config["account_filters"] = {
+            "desearch_ai": {"positive": ["desearch"], "negative": [], "goal": "Brand authority"}
+        }
+        signal = monitor.normalize_tweet(
+            {"id": "124", "text": "desearch developer API question", "created_at": "2026-04-30T09:00:00+00:00"},
+            "keyword:desearch",
+            "desearch",
+            "high",
+            "Brand hashtag",
+            ["brand"],
+            ["x-engage/brand"],
+            config=config,
+        )
+
+        summary = monitor.build_telemetry_output_summary(
+            started_at="2026-04-30T09:00:00+00:00",
+            finished_at="2026-04-30T09:00:01+00:00",
+            status="success",
+            stats={"total_fetched": 3, "emitted_count": 1},
+            emitted_signals=[signal],
+            errors=[],
+            pending_alerts_count=None,
+        )
+
+        self.assertEqual(summary["raw_collected_count"], 3)
+        self.assertEqual(summary["candidate_signal_count"], 1)
+        self.assertEqual(summary["publishable_signal_count"], 0)
+        self.assertEqual(summary["signal_stage_note"], "x-monitor is passive: collected and candidate signals are not publishable drafts.")
 
     def test_emit_social_runtime_events_skips_without_credentials_and_does_not_call_network(self):
         empty_env = {

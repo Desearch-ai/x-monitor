@@ -204,6 +204,151 @@ def normalize_int(value: object, default: int = 0) -> int:
         return default
 
 
+def normalize_account_filter_map(filters: object) -> dict:
+    if not isinstance(filters, dict):
+        return {}
+
+    normalized: dict[str, dict] = {}
+    for account, raw in filters.items():
+        handle = normalize_string(account).lstrip("@")
+        if not handle or not isinstance(raw, dict):
+            continue
+        normalized[handle] = {
+            "positive": normalize_string_list(
+                raw.get("positive") or raw.get("positive_keywords")
+            ),
+            "negative": normalize_string_list(
+                raw.get("negative") or raw.get("negative_keywords")
+            ),
+            "goal": normalize_string(
+                raw.get("goal") or raw.get("account_goal") or raw.get("account_goal_hint")
+            ),
+        }
+    return normalized
+
+
+def normalize_account_goal_map(goals: object) -> dict[str, str]:
+    if not isinstance(goals, dict):
+        return {}
+
+    normalized: dict[str, str] = {}
+    for account, raw in goals.items():
+        handle = normalize_string(account).lstrip("@")
+        if not handle:
+            continue
+        if isinstance(raw, dict):
+            goal = normalize_string(
+                raw.get("goal") or raw.get("account_goal") or raw.get("account_goal_hint")
+            )
+        else:
+            goal = normalize_string(raw)
+        if goal:
+            normalized[handle] = goal
+    return normalized
+
+
+def text_matches(text: str, terms: list[str]) -> list[str]:
+    haystack = text.lower()
+    matches: list[str] = []
+    for term in terms:
+        if term.lower() in haystack and term not in matches:
+            matches.append(term)
+    return matches
+
+
+def account_handles_for_lanes(lanes: list[str], config: dict) -> list[str]:
+    handles: list[str] = []
+    for account in config.get("accounts", []):
+        if not isinstance(account, dict):
+            continue
+        username = normalize_string(account.get("username")).lstrip("@")
+        if not username:
+            continue
+        account_lanes = normalize_string_list(account.get("lanes"))
+        if any(lane in account_lanes for lane in lanes) and username not in handles:
+            handles.append(username)
+    return handles
+
+
+def build_account_eligibility_metadata(signal: dict, config: dict | None) -> dict:
+    data = config if isinstance(config, dict) else {}
+    lanes = normalize_string_list(signal.get("_monitor_lanes"))
+    source_text = " ".join(
+        normalize_string(value)
+        for value in (
+            signal.get("text"),
+            signal.get("full_text"),
+            signal.get("_monitor_bucket"),
+            signal.get("_monitor_context"),
+            signal.get("_monitor_source"),
+        )
+        if normalize_string(value)
+    )
+    account_filters = normalize_account_filter_map(data.get("account_filters"))
+    account_goals = normalize_account_goal_map(data.get("account_goals"))
+    lane_accounts = account_handles_for_lanes(lanes, data)
+
+    eligible: list[str] = []
+    goals: dict[str, str] = {}
+    negative_matches: dict[str, list[str]] = {}
+    positive_reasons: list[str] = []
+
+    candidate_accounts = list(dict.fromkeys([*lane_accounts, *account_filters.keys()]))
+    for handle in candidate_accounts:
+        rule = account_filters.get(handle, {})
+        positive = normalize_string_list(rule.get("positive"))
+        negative = normalize_string_list(rule.get("negative"))
+        positives_hit = text_matches(source_text, positive) if positive else []
+        negatives_hit = text_matches(source_text, negative) if negative else []
+        if negatives_hit:
+            negative_matches[handle] = negatives_hit
+            continue
+
+        routed_by_lane = handle in lane_accounts
+        matched_positive = bool(positives_hit)
+        if matched_positive or (routed_by_lane and not positive):
+            eligible.append(handle)
+            goal = normalize_string(rule.get("goal") or account_goals.get(handle))
+            if goal:
+                goals[handle] = goal
+            if matched_positive:
+                positive_reasons.append(f"{handle}: positive filter matched {', '.join(positives_hit)}")
+            elif routed_by_lane:
+                positive_reasons.append(f"{handle}: lane route matched {', '.join(lanes)}")
+
+    skipped_reason = ""
+    if not eligible:
+        if negative_matches:
+            skipped_reason = "negative_filter_match"
+        elif account_filters:
+            skipped_reason = "no_account_positive_filter_match"
+        elif lane_accounts:
+            skipped_reason = "lane_routed_no_account_strategy"
+
+    return {
+        "collection_stage": "raw_collected",
+        "filter_stage": "candidate" if eligible else "unqualified",
+        "eligible_accounts": eligible,
+        "account_goal_hint": goals,
+        "signal_value_reason": (
+            "; ".join(positive_reasons)
+            if positive_reasons
+            else "No account-specific positive filter matched."
+        ),
+        "negative_filter_matches": negative_matches,
+        "skipped_reason": skipped_reason,
+    }
+
+
+def candidate_signal_count(signals: list | None) -> int:
+    return sum(
+        1
+        for signal in (signals or [])
+        if isinstance(signal, dict)
+        and normalize_string_list(signal.get("_monitor_eligible_accounts"))
+        and normalize_string(signal.get("_monitor_filter_stage"), "candidate") == "candidate"
+    )
+
 def read_json_file(path: Path) -> dict:
     data = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -340,6 +485,26 @@ def build_representative_signal_metadata(signals: list, limit: int = REPRESENTAT
             "route_hints": normalize_string_list(signal.get("_monitor_route_hints")),
             "importance": normalize_string(signal.get("_monitor_importance")),
             "context": normalize_string(signal.get("_monitor_context")),
+            "collection_stage": normalize_string(signal.get("_monitor_collection_stage"), "raw_collected"),
+            "filter_stage": normalize_string(
+                signal.get("_monitor_filter_stage"),
+                "candidate"
+                if normalize_string_list(signal.get("_monitor_eligible_accounts"))
+                else "unqualified",
+            ),
+            "eligible_accounts": normalize_string_list(signal.get("_monitor_eligible_accounts")),
+            "account_goal_hint": (
+                signal.get("_monitor_account_goal_hint")
+                if isinstance(signal.get("_monitor_account_goal_hint"), dict)
+                else {}
+            ),
+            "signal_value_reason": normalize_string(signal.get("_monitor_signal_value_reason")),
+            "negative_filter_matches": (
+                signal.get("_monitor_negative_filter_matches")
+                if isinstance(signal.get("_monitor_negative_filter_matches"), dict)
+                else {}
+            ),
+            "skipped_reason": normalize_string(signal.get("_monitor_skipped_reason")),
         }
         if tweet_id:
             item["tweet_id"] = tweet_id
@@ -389,6 +554,10 @@ def build_telemetry_output_summary(
         "queued_count": normalize_int(stats_data.get("queued_count"), 0),
         "lanes_routed": stats_data.get("lanes_routed") if isinstance(stats_data.get("lanes_routed"), dict) else {},
         "source_errors": errors if isinstance(errors, list) else [],
+        "raw_collected_count": normalize_int(stats_data.get("total_fetched"), 0),
+        "candidate_signal_count": candidate_signal_count(emitted_signals),
+        "publishable_signal_count": 0,
+        "signal_stage_note": "x-monitor is passive: collected and candidate signals are not publishable drafts.",
         "representative_signals": build_representative_signal_metadata(emitted_signals or []),
     }
     if pending_alerts_count is not None:
@@ -603,6 +772,10 @@ def project_social_runtime_config_row(row: dict) -> dict | None:
         "keywords": keywords,
         "discord": {"alerts_channel": DEFAULT_DISCORD_CHANNEL},
         "filters": normalize_filters({}),
+        "account_filters": normalize_account_filter_map(
+            row.get("account_filters") or row.get("account_strategy") or row.get("account_routing")
+        ),
+        "account_goals": normalize_account_goal_map(row.get("account_goals")),
     }
 
 
@@ -750,6 +923,12 @@ def build_x_monitor_projection_from_contract(contract: dict) -> dict:
         "keywords": keywords,
         "discord": {"alerts_channel": discord_channel},
         "filters": normalize_filters(service_settings.get("filters")),
+        "account_filters": normalize_account_filter_map(
+            contract.get("account_filters")
+            or contract.get("account_strategy")
+            or contract.get("account_routing")
+        ),
+        "account_goals": normalize_account_goal_map(contract.get("account_goals")),
     }
 
 
@@ -804,6 +983,12 @@ def project_managed_runtime(payload: dict) -> dict | None:
                 "alerts_channel": normalize_string(discord.get("alerts_channel"), DEFAULT_DISCORD_CHANNEL),
             },
             "filters": normalize_filters(payload.get("filters")),
+            "account_filters": normalize_account_filter_map(
+                payload.get("account_filters")
+                or payload.get("account_strategy")
+                or payload.get("account_routing")
+            ),
+            "account_goals": normalize_account_goal_map(payload.get("account_goals")),
         }
 
     if isinstance(payload.get("watchlists"), list) and isinstance(payload.get("lanes"), list):
@@ -965,7 +1150,16 @@ def parse_twitter_date(s: str) -> str | None:
         return None
 
 
-def normalize_tweet(tweet: dict, source: str, bucket: str, importance: str, context: str, lanes: list, route_hints: list) -> dict:
+def normalize_tweet(
+    tweet: dict,
+    source: str,
+    bucket: str,
+    importance: str,
+    context: str,
+    lanes: list,
+    route_hints: list,
+    config: dict | None = None,
+) -> dict:
     """
     Add v2 monitor metadata to a tweet dict.
 
@@ -985,6 +1179,14 @@ def normalize_tweet(tweet: dict, source: str, bucket: str, importance: str, cont
     tweet["_monitor_context"] = context
     tweet["_monitor_lanes"] = lanes
     tweet["_monitor_route_hints"] = route_hints
+    eligibility = build_account_eligibility_metadata(tweet, config)
+    tweet["_monitor_collection_stage"] = eligibility["collection_stage"]
+    tweet["_monitor_filter_stage"] = eligibility["filter_stage"]
+    tweet["_monitor_eligible_accounts"] = eligibility["eligible_accounts"]
+    tweet["_monitor_account_goal_hint"] = eligibility["account_goal_hint"]
+    tweet["_monitor_signal_value_reason"] = eligibility["signal_value_reason"]
+    tweet["_monitor_negative_filter_matches"] = eligibility["negative_filter_matches"]
+    tweet["_monitor_skipped_reason"] = eligibility["skipped_reason"]
 
     ca = tweet.get("created_at", "")
     if ca and not ca[0].isdigit():
@@ -1095,7 +1297,7 @@ def main():
                 route_hints = resolve_route_hints(lanes, config)
 
                 t_copy = dict(tweet)
-                normalize_tweet(t_copy, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints)
+                normalize_tweet(t_copy, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints, config=config)
                 all_window_tweets.append(t_copy)
 
                 if tid in seen:
@@ -1112,7 +1314,7 @@ def main():
                     continue
 
                 if is_important_enough(tweet, account, global_filters):
-                    normalize_tweet(tweet, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints)
+                    normalize_tweet(tweet, f"account:{username}", bucket, account.get("importance", "normal"), account.get("context", ""), lanes, route_hints, config=config)
                     new_for_account.append(tweet)
 
                     for lane in lanes:
@@ -1149,7 +1351,7 @@ def main():
                 route_hints = resolve_route_hints(lanes, config)
 
                 t_copy = dict(tweet)
-                normalize_tweet(t_copy, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)
+                normalize_tweet(t_copy, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints, config=config)
                 all_window_tweets.append(t_copy)
 
                 if tid in seen:
@@ -1157,7 +1359,7 @@ def main():
                     continue
                 stats["new_count"] += 1
 
-                normalize_tweet(tweet, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints)
+                normalize_tweet(tweet, f"keyword:{query}", bucket, kw.get("importance", "high"), kw.get("context", ""), lanes, route_hints, config=config)
                 new_for_kw.append(tweet)
                 new_ids.append(tid)
 
