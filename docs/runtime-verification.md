@@ -38,3 +38,18 @@ Done: 1 message(s) posted, pending_alerts.json cleared
 - retry after partial success: does not duplicate already delivered chunks in Discord
 - Discord 429/rate-limit responses: retry with bounded `Retry-After`/`retry_after` backoff before failing the chunk; default cron attempts are capped so a rate limit cannot hang forever
 - lock handling: active `.pending-alerts.lock` directories are respected; stale dead locks are recovered before cron posts
+
+## Task #1443 stale lock/backlog hygiene verification
+
+Observed on Giga's local runtime path `/Users/giga/projects/openclaw/x-monitor` for O-69 hygiene:
+
+- stale lock files `.monitor.lock` and `.pending-alerts.lock` both contained PID `6295`; `ps -p 6295` returned no process and non-blocking lock probes succeeded before rotation
+- `pending_alerts.json` contained 543 preserved alerts before rotation, oldest `2016-05-05T23:53:28+00:00`, newest `2026-05-09T14:08:16+00:00`
+- the full queue was backed up before the active queue was atomically reset to `[]`; the active queue verified at count `0` after rotation
+- no live X actions and no Discord backlog drain were executed; backlog handling remains digest/preserve/rate-limited, not blind mass posting
+
+Canonical artifact with exact backup paths and hashes:
+
+```text
+/Users/giga/.docs/cosmic-brain/projects/x-monitor/tasks/ops/2026-05-x-monitor-locks-backlog-hygiene.md
+```
