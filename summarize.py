@@ -18,7 +18,6 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import requests
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 
@@ -108,6 +107,11 @@ def call_openrouter(prompt: str) -> str:
     api_key = os.environ.get("OPENROUTER_API_KEY")
     if not api_key:
         raise ValueError("OPENROUTER_API_KEY not set")
+
+    try:
+        import requests
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("requests is required for OpenRouter summarization") from exc
 
     try:
         resp = requests.post(

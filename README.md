@@ -13,14 +13,16 @@ The system routes signals through two lanes:
 
 Each watched account or keyword maps to a **bucket** and one or more **lanes**. Tweets are normalized with `_monitor_lanes` and `_monitor_route_hints` so downstream tools can route them appropriately.
 
-X Monitor is the passive monitoring half of the Desearch social workflow. It is responsible for:
+X Monitor is a standalone passive signal intelligence service/UI for the Desearch social workflow. It is responsible for:
 - polling configured X timelines and search queries
+- letting operators/agents inspect and safely edit local watchlists
 - deduplicating posts against local seen-state
 - saving a 24 hour rolling window for summaries and stats
+- exposing normalized Signal records for Socialos and agents
 - queuing newly detected posts for Discord delivery
 - optionally exporting a digest to Feishu
 
-It does not perform active engagement actions such as replies, likes, or follows. That belongs in the separate `x-engage` repo.
+It does not perform active engagement actions such as replies, likes, follows, account authentication, approvals, scheduling, or publishing. Socialos owns publishing/account auth/approval/execution, and `x-engage` owns approval-aware execution runtime code.
 
 ### Accounts
 
@@ -103,13 +105,40 @@ DESEARCH_API_KEY=xxx uv run python monitor.py --lane-filter founder
 DESEARCH_API_KEY=xxx uv run python monitor.py --lane-filter brand
 ```
 
-### 5. Post queued alerts to Discord
+### 5. Start the standalone watchlist/signals UI/API
+
+```bash
+cd ~/projects/openclaw/x-monitor
+uv run python x_monitor_api.py --host 127.0.0.1 --port 8766
+```
+
+Open `http://127.0.0.1:8766` for the operator UI. The local API is additive: page loads and API reads do **not** trigger X fetches or mutate monitor state. Watchlist writes persist to `config.json` by default, or to an explicit dev path with:
+
+```bash
+X_MONITOR_ADMIN_CONFIG_PATH=/tmp/x-monitor-config.json uv run python x_monitor_api.py
+```
+
+Routes:
+
+| Route | Method | Purpose |
+|---|---:|---|
+| `/` | GET | HTML operator view for watchlists, route hints, agent setup, and latest signals |
+| `/api/health` | GET | Local health/version check |
+| `/api/watchlist` | GET | Return accounts, keywords, mentions, lists, route hints, counts, and agent setup |
+| `/api/watchlist` | POST | Add one `account`, `keyword`, `mention`, or `list` item |
+| `/api/watchlist/{id}` | PATCH | Update bucket/lanes/importance/context/value for one item |
+| `/api/watchlist/{id}` | DELETE | Remove one item |
+| `/api/signals?limit=50` | GET | Return latest normalized Signal records from `tweets_window.json` + `pending_alerts.json` |
+
+The API rejects publishing/account-auth fields such as credentials, sessions, approvals, schedules, and publish/execution controls. Those controls belong in Socialos, not X-Monitor.
+
+### 6. Post queued alerts to Discord
 
 ```bash
 node post-to-discord.cjs
 ```
 
-### 6. Enable cron
+### 7. Enable cron
 
 Cron job ID: `cf7191f8-4097-4cc0-9c90-64a86c663366` — runs every 2 hours for passive ingestion only. Live X actions remain in `x-engage` and stay behind manual approval.
 
@@ -230,6 +259,51 @@ If an explicit managed-runtime env path is set but missing, the monitor exits in
 | `state.json` | Per-source seen-ID dedupe store |
 | `tweets_window.json` | Rolling 24h tweet cache |
 | `pending_alerts.json` | Discord delivery queue |
+
+## Standalone Signal contract v1
+
+`GET /api/signals` returns normalized Signal records for Socialos/agents without exposing raw full tweet payloads as the primary contract. Each Signal includes:
+
+| Field | Meaning |
+|---|---|
+| `id` | Stable X-Monitor signal id, derived from platform/source/external id/url |
+| `platform` | Always `x` for this service |
+| `source` | Matched monitor source such as `keyword:sn22 bittensor` or `account:const` |
+| `source_url` | Canonical X post URL when available |
+| `external_id` | X post/tweet id when available |
+| `author` | `{ handle, name?, id? }` when present in source data |
+| `content_snippet` | Compacted text snippet capped for operator display |
+| `matched_terms` | Keyword/mention terms that matched the watchlist |
+| `matched_accounts` | Account handles that matched the watchlist |
+| `route_hints` | Downstream route hints resolved from lanes |
+| `score` | 0-100 local relevance score from importance + engagement - risk |
+| `why_now` / `reason` | Human-readable match reason/context |
+| `risk_flags` | Local risk qualifiers such as `negative_filter_match`, `reply`, `retweet`, `possibly_sensitive` |
+| `observed_at` | When X-Monitor observed or normalized the record |
+| `created_at` | Source post creation timestamp when available |
+
+Example:
+
+```json
+{
+  "id": "a2b5f7d3e0c9a11844d200ff",
+  "platform": "x",
+  "source": "keyword:sn22 bittensor",
+  "source_url": "https://x.com/builderdao/status/1888",
+  "external_id": "1888",
+  "author": { "handle": "builderdao" },
+  "content_snippet": "Desearch SN22 launch signal from builder",
+  "matched_terms": ["sn22 bittensor"],
+  "matched_accounts": [],
+  "route_hints": ["x-engage/brand"],
+  "score": 100,
+  "why_now": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
+  "reason": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
+  "risk_flags": [],
+  "observed_at": "2026-05-12T00:02:00+00:00",
+  "created_at": "2026-05-12T00:01:00+00:00"
+}
+```
 
 ## Output metadata (v2)
 
