@@ -472,6 +472,181 @@ def build_telemetry_input_snapshot(config: dict | None) -> dict:
     return snapshot
 
 
+def tweet_external_id(tweet: dict) -> str:
+    return str(tweet.get("id") or tweet.get("id_str") or tweet.get("tweet_id") or "").strip()
+
+
+def tweet_author(tweet: dict) -> dict:
+    user = tweet.get("user") if isinstance(tweet.get("user"), dict) else {}
+    handle = normalize_string(
+        tweet.get("username")
+        or tweet.get("author_username")
+        or tweet.get("screen_name")
+        or user.get("username")
+        or user.get("screen_name")
+    ).lstrip("@")
+    author: dict[str, str] = {}
+    if handle:
+        author["handle"] = handle
+    name = normalize_string(tweet.get("author_name") or tweet.get("name") or user.get("name"))
+    if name:
+        author["name"] = name
+    author_id = normalize_string(tweet.get("author_id") or user.get("id") or user.get("id_str"))
+    if author_id:
+        author["id"] = author_id
+    return author
+
+
+def tweet_source_url(tweet: dict) -> str:
+    explicit = normalize_string(tweet.get("url") or tweet.get("tweet_url") or tweet.get("expanded_url"))
+    if explicit:
+        return explicit
+    author = tweet_author(tweet).get("handle", "")
+    external_id = tweet_external_id(tweet)
+    if author and external_id:
+        return f"https://x.com/{author}/status/{external_id}"
+    return ""
+
+
+def content_snippet(tweet: dict, limit: int = 280) -> str:
+    text = normalize_string(tweet.get("text") or tweet.get("full_text") or tweet.get("content"))
+    compact = " ".join(text.split())
+    if len(compact) <= limit:
+        return compact
+    return f"{compact[: max(0, limit - 1)].rstrip()}…"
+
+
+def source_match_value(source: str, prefix: str) -> str:
+    if not source.startswith(prefix):
+        return ""
+    return normalize_string(source[len(prefix):])
+
+
+def signal_matched_terms(tweet: dict, config: dict | None = None) -> list[str]:
+    explicit = normalize_string_list(tweet.get("_monitor_matched_terms") or tweet.get("matched_terms"))
+    if explicit:
+        return explicit
+    source = normalize_string(tweet.get("_monitor_source") or tweet.get("source"))
+    if source.startswith("keyword:"):
+        value = source_match_value(source, "keyword:")
+        return [value] if value else []
+
+    terms: list[str] = []
+    data = config if isinstance(config, dict) else {}
+    text = content_snippet(tweet).lower()
+    for keyword in data.get("keywords", []):
+        if not isinstance(keyword, dict):
+            continue
+        query = normalize_string(keyword.get("query"))
+        if query and query.lower() in text and query not in terms:
+            terms.append(query)
+    return terms
+
+
+def signal_matched_accounts(tweet: dict) -> list[str]:
+    explicit = normalize_string_list(tweet.get("_monitor_matched_accounts") or tweet.get("matched_accounts"))
+    if explicit:
+        return [item.lstrip("@") for item in explicit]
+    source = normalize_string(tweet.get("_monitor_source") or tweet.get("source"))
+    if source.startswith("account:"):
+        value = source_match_value(source, "account:").lstrip("@")
+        return [value] if value else []
+    return []
+
+
+def signal_risk_flags(tweet: dict) -> list[str]:
+    flags: list[str] = []
+    negative_matches = tweet.get("_monitor_negative_filter_matches")
+    if isinstance(negative_matches, dict) and negative_matches:
+        flags.append("negative_filter_match")
+    skipped_reason = normalize_string(tweet.get("_monitor_skipped_reason"))
+    if skipped_reason and skipped_reason not in flags:
+        flags.append(skipped_reason)
+    filter_stage = normalize_string(tweet.get("_monitor_filter_stage"))
+    if filter_stage == "unqualified" and skipped_reason and "unqualified" not in flags:
+        flags.append("unqualified")
+    if tweet.get("possibly_sensitive") is True:
+        flags.append("possibly_sensitive")
+    if tweet.get("is_retweet") is True:
+        flags.append("retweet")
+    if tweet.get("in_reply_to_status_id"):
+        flags.append("reply")
+    return flags
+
+
+def signal_score(tweet: dict) -> int:
+    explicit = normalize_int(tweet.get("_monitor_score"), -1)
+    if explicit >= 0:
+        return max(0, min(explicit, 100))
+    importance = normalize_string(tweet.get("_monitor_importance"), "normal")
+    score = 90 if importance == "high" else 60
+    score += min(normalize_int(tweet.get("like_count") or tweet.get("favorite_count"), 0), 20)
+    score += min(normalize_int(tweet.get("retweet_count"), 0) * 2, 10)
+    if signal_risk_flags(tweet):
+        score -= 25
+    return max(0, min(score, 100))
+
+
+def build_normalized_signal(
+    tweet: dict,
+    *,
+    observed_at: str | None = None,
+    config: dict | None = None,
+) -> dict:
+    """Build the standalone X-Monitor v1 Signal contract from a monitor tweet."""
+    if not isinstance(tweet, dict):
+        raise TypeError("tweet must be a dict")
+
+    source = normalize_string(tweet.get("_monitor_source") or tweet.get("source"), "unknown")
+    external_id = tweet_external_id(tweet)
+    source_url = tweet_source_url(tweet)
+    created_at = normalize_string(tweet.get("created_at") or tweet.get("timestamp"))
+    observed = normalize_string(observed_at or tweet.get("_monitor_observed_at") or created_at)
+    if not observed:
+        observed = datetime.now(timezone.utc).isoformat()
+
+    basis = "|".join(part for part in ("x", source, external_id, source_url, created_at) if part)
+    signal_id = normalize_string(tweet.get("_monitor_signal_id")) or hashlib.sha256(
+        basis.encode("utf-8")
+    ).hexdigest()[:24]
+
+    signal_value_reason = normalize_string(tweet.get("_monitor_signal_value_reason"))
+    context = normalize_string(tweet.get("_monitor_context"))
+    why_parts = [f"Matched {source} watchlist"]
+    if signal_value_reason and signal_value_reason != "No account-specific positive filter matched.":
+        why_parts.append(signal_value_reason)
+    if context:
+        why_parts.append(context)
+    why_now = "; ".join(why_parts)
+
+    filter_stage = normalize_string(tweet.get("_monitor_filter_stage"), "candidate")
+    matched_terms = signal_matched_terms(tweet, config=config)
+    matched_accounts = signal_matched_accounts(tweet)
+
+    return {
+        "id": signal_id,
+        "platform": "x",
+        "source": source,
+        "source_url": source_url,
+        "external_id": external_id,
+        "author": tweet_author(tweet),
+        "content_snippet": content_snippet(tweet),
+        "matched_terms": matched_terms,
+        "matched_accounts": matched_accounts,
+        "route_hints": normalize_string_list(tweet.get("_monitor_route_hints")),
+        "score": signal_score(tweet),
+        "why_now": why_now,
+        "reason": why_now,
+        "risk_flags": signal_risk_flags(tweet),
+        "observed_at": observed,
+        "created_at": created_at,
+        "bucket": normalize_string(tweet.get("_monitor_bucket") or tweet.get("_monitor_category")),
+        "lanes": normalize_string_list(tweet.get("_monitor_lanes")),
+        "qualification": filter_stage,
+        "collection_stage": normalize_string(tweet.get("_monitor_collection_stage"), "raw_collected"),
+    }
+
+
 def build_representative_signal_metadata(signals: list, limit: int = REPRESENTATIVE_SIGNAL_LIMIT) -> list[dict]:
     representative: list[dict] = []
     for signal in signals[:limit]:

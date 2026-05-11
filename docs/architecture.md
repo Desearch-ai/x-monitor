@@ -2,11 +2,12 @@
 
 ## Overview
 
-X Monitor is a file-backed pipeline that polls X/Twitter for monitored accounts and keywords, deduplicates results, normalizes them with rich routing metadata, and queues output for Discord delivery.
+X Monitor is a standalone X signal intelligence service/UI backed by local JSON files. It polls X/Twitter for monitored accounts and keywords, deduplicates results, normalizes them with rich routing metadata, exposes watchlist/signals API endpoints for operators and agents, and queues output for Discord delivery.
 
-The system has two layers:
+The system has three layers:
 1. **Collection** (`monitor.py`) — fetches tweets, normalizes with lane metadata, writes file artifacts
-2. **Delivery** (helper scripts) — reads artifacts and posts to Discord, Feishu, or other destinations
+2. **Local API/UI** (`x_monitor_api.py`) — serves operator watchlist management and normalized Signal records without triggering X fetches
+3. **Delivery** (helper scripts) — reads artifacts and posts to Discord, Feishu, or other destinations
 
 Core roles:
 - `monitor.py` collects and normalizes tweet data
@@ -29,7 +30,8 @@ The `founder` lane captures signals relevant to the founder personally. The `bra
 
 ```
 x-monitor/
-  monitor.py              # v2 collection entry point
+  monitor.py              # v2 collection entry point + normalized Signal contract builder
+  x_monitor_api.py        # local standalone watchlist/signals UI/API v1
   config.json            # lanes, accounts, keywords, filters
   state.json             # per-source seen-ID dedupe store
   tweets_window.json     # rolling 24h tweet cache
@@ -107,6 +109,61 @@ lane: { "id": "founder", "buckets": [...], "route_hint": "x-engage/founder" }
   → route_hint = "x-engage/founder"
 ```
 
+## Standalone UI/API v1
+
+Start locally:
+
+```bash
+uv run python x_monitor_api.py --host 127.0.0.1 --port 8766
+```
+
+Default port: `8766`. Default bind host: `127.0.0.1`. Default watchlist persistence path: repo-local `config.json`. For safe local/dev edits, point the server at a copy:
+
+```bash
+X_MONITOR_ADMIN_CONFIG_PATH=/tmp/x-monitor-config.json uv run python x_monitor_api.py
+```
+
+Routes:
+
+| Route | Method | Response/body impact |
+|---|---:|---|
+| `/` | GET | HTML view of watchlists, route hints, agent setup, and latest signals |
+| `/api/health` | GET | `{ status, service, version }` |
+| `/api/watchlist` | GET | `{ accounts, keywords, mentions, lists, counts, lanes, route_hints, agent_setup }` |
+| `/api/watchlist` | POST | JSON body `{ kind, value, bucket?, lanes?, importance?, context?, include_retweets? }`; returns created item |
+| `/api/watchlist/{id}` | PATCH | Same additive body fields; returns updated item |
+| `/api/watchlist/{id}` | DELETE | Returns removed item |
+| `/api/signals?limit=50` | GET | `{ signals, count, contract }` from local `tweets_window.json` + `pending_alerts.json` |
+
+The API uses consistent JSON errors: `{ "error": { "message": string, "details": object } }`. It is intentionally local-first and file-backed; HTTP reads do not call Desearch/X and watchlist writes do not trigger collection.
+
+### Normalized Signal contract
+
+The normalized Signal record is built by `monitor.build_normalized_signal()` and exposed by `GET /api/signals` for Socialos and agents. Required fields:
+
+```json
+{
+  "id": "stable-signal-id",
+  "platform": "x",
+  "source": "keyword:sn22 bittensor",
+  "source_url": "https://x.com/builderdao/status/1888",
+  "external_id": "1888",
+  "author": { "handle": "builderdao" },
+  "content_snippet": "Desearch SN22 launch signal from builder",
+  "matched_terms": ["sn22 bittensor"],
+  "matched_accounts": [],
+  "route_hints": ["x-engage/brand"],
+  "score": 100,
+  "why_now": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
+  "reason": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
+  "risk_flags": [],
+  "observed_at": "2026-05-12T00:02:00+00:00",
+  "created_at": "2026-05-12T00:01:00+00:00"
+}
+```
+
+Risk flags are local qualifiers (`negative_filter_match`, `unqualified`, `reply`, `retweet`, `possibly_sensitive`). A Signal is not a publishable draft; `publishable_signal_count` remains `0` in telemetry because Socialos owns publishing approvals and execution.
+
 ## CLI options
 
 ```bash
@@ -140,17 +197,22 @@ Collection, normalization, and LLM summarization live in Python. Discord posting
 
 ## Boundaries
 
-This repo is for passive monitoring and reporting.
+This repo is for passive monitoring, local watchlist/signals operation, and signal handoff.
 
 It should:
 - detect and package relevant X posts
+- let operators/agents inspect and safely edit watchlists
 - maintain enough local state for dedupe and short-window analysis
+- expose normalized Signal records to Socialos/agents
 - hand off alerts, summaries, and digests to downstream channels
 
 It should not:
 - execute engagement actions on X
+- manage X account auth, browser sessions, approvals, publishing, scheduling, or regeneration
 - act as a long-term analytics warehouse
 - assume direct X API access exists inside the repo itself
+
+Socialos owns publishing/account auth/approval/execution. X-Monitor only emits signal intelligence and route hints.
 
 ## ADRs
 
