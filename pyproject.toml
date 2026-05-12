@@ -1,0 +1,12 @@
+[project]
+name = "x-monitor"
+version = "0.1.0"
+description = "Local X-Monitor passive signal intelligence runtime"
+requires-python = ">=3.11"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+
+[tool.uv]
+package = false

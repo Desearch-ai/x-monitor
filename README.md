@@ -122,15 +122,17 @@ Routes:
 
 | Route | Method | Purpose |
 |---|---:|---|
-| `/` | GET | HTML operator view for watchlists, route hints, agent setup, and latest signals |
+| `/` | GET | Polished operator console with command-doc sections, watchlist table, searchable signal history, and route provenance |
 | `/api/health` | GET | Local health/version check |
-| `/api/watchlist` | GET | Return accounts, keywords, mentions, lists, route hints, counts, and agent setup |
+| `/api/watchlist` | GET | Return accounts, keywords, mentions, lists, route hints/labels, lane source, counts, and agent setup |
 | `/api/watchlist` | POST | Add one `account`, `keyword`, `mention`, or `list` item |
 | `/api/watchlist/{id}` | PATCH | Update bucket/lanes/importance/context/value for one item |
 | `/api/watchlist/{id}` | DELETE | Remove one item |
-| `/api/signals?limit=50` | GET | Return latest normalized Signal records from `tweets_window.json` + `pending_alerts.json` |
+| `/api/signals?limit=50` | GET | Return latest normalized Signal records from `tweets_window.json` + `pending_alerts.json`, including additive provenance fields |
 
 The API rejects publishing/account-auth fields such as credentials, sessions, approvals, schedules, and publish/execution controls. Those controls belong in Socialos, not X-Monitor.
+
+Operator route labels are shown as `socialos/*`. Existing `x-engage/*` route hints remain backward-compatible internal aliases and are explicitly labeled as legacy in the UI/API docs.
 
 ### 6. Post queued alerts to Discord
 
@@ -275,7 +277,9 @@ If an explicit managed-runtime env path is set but missing, the monitor exits in
 | `content_snippet` | Compacted text snippet capped for operator display |
 | `matched_terms` | Keyword/mention terms that matched the watchlist |
 | `matched_accounts` | Account handles that matched the watchlist |
-| `route_hints` | Downstream route hints resolved from lanes |
+| `route_hints` | Backward-compatible downstream route hints resolved from lanes; `x-engage/*` values are legacy internal aliases |
+| `provenance` | Additive route provenance: matched watchlist items, bucket, lanes, lane source (`explicit_item_config`, `bucket_fallback`, or `signal_metadata`), and route labels |
+| `route_explanation` | Human-readable explanation of what matched, how lanes were assigned, and how route hints map to Socialos labels |
 | `score` | 0-100 local relevance score from importance + engagement - risk |
 | `why_now` / `reason` | Human-readable match reason/context |
 | `risk_flags` | Local risk qualifiers such as `negative_filter_match`, `reply`, `retweet`, `possibly_sensitive` |
@@ -296,6 +300,18 @@ Example:
   "matched_terms": ["sn22 bittensor"],
   "matched_accounts": [],
   "route_hints": ["x-engage/brand"],
+  "provenance": {
+    "matched_watchlist_items": [
+      {"kind": "keyword", "value": "sn22 bittensor", "bucket": "subnet", "lanes": ["brand"], "lane_source": "explicit_item_config"}
+    ],
+    "bucket": "subnet",
+    "lanes": ["brand"],
+    "lane_source": "explicit_item_config",
+    "route_hints": [
+      {"hint": "x-engage/brand", "display_label": "socialos/brand", "lane": "brand", "source": "lane_config", "legacy_internal_alias": true}
+    ]
+  },
+  "route_explanation": "Matched keyword:sn22 bittensor; bucket subnet assigned lanes brand via explicit lanes from the matched watchlist item config; route labels socialos/brand. Legacy x-engage/* hints are internal aliases for Socialos routes.",
   "score": 100,
   "why_now": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
   "reason": "Matched keyword:sn22 bittensor watchlist; Subnet 22 mentions",
