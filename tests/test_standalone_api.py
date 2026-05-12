@@ -1,4 +1,5 @@
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -150,6 +151,154 @@ class WatchlistPersistenceTests(unittest.TestCase):
                 x_monitor_api.add_watchlist_item(config_path, {"kind": "keyword", "value": "desearch", "approval_required": True})
             self.assertEqual(unsafe.exception.status, 400)
             self.assertIn("Publishing/account-auth fields", unsafe.exception.message)
+
+
+class SignalProvenanceTests(unittest.TestCase):
+    def make_config(self):
+        return {
+            "lanes": [
+                {"id": "brand", "name": "Brand", "buckets": ["desearch", "subnet"], "route_hint": "x-engage/brand"},
+                {"id": "founder", "name": "Founder", "buckets": ["builder"], "route_hint": "x-engage/founder"},
+            ],
+            "accounts": [
+                {"username": "desearch_ai", "bucket": "desearch", "lanes": ["brand"], "importance": "high", "context": "Brand account"},
+                {"username": "builderdao", "bucket": "builder", "importance": "high", "context": "Builder account"},
+            ],
+            "keywords": [
+                {"query": "sn22 bittensor", "bucket": "subnet", "importance": "high", "context": "Subnet mentions"}
+            ],
+            "lists": [],
+        }
+
+    def write_json(self, path: Path, payload):
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    def test_load_signals_adds_explicit_lane_route_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.json"
+            signals_path = tmp / "signals.json"
+            pending_path = tmp / "pending.json"
+            self.write_json(config_path, self.make_config())
+            self.write_json(signals_path, [
+                {
+                    "id": "1",
+                    "text": "Desearch account update",
+                    "username": "desearch_ai",
+                    "created_at": "2026-05-12T01:00:00+00:00",
+                    "_monitor_source": "account:desearch_ai",
+                    "_monitor_bucket": "desearch",
+                    "_monitor_lanes": ["brand"],
+                    "_monitor_route_hints": ["x-engage/brand"],
+                    "_monitor_importance": "high",
+                    "_monitor_context": "Brand account",
+                }
+            ])
+            self.write_json(pending_path, [])
+
+            signal = x_monitor_api.load_signals(
+                limit=10,
+                signals_path=signals_path,
+                pending_path=pending_path,
+                config_path=config_path,
+            )["signals"][0]
+
+            self.assertEqual(signal["provenance"]["lane_source"], "explicit_item_config")
+            self.assertEqual(signal["provenance"]["matched_watchlist_items"][0]["kind"], "account")
+            self.assertEqual(signal["provenance"]["matched_watchlist_items"][0]["value"], "desearch_ai")
+            self.assertEqual(signal["provenance"]["route_hints"][0]["hint"], "x-engage/brand")
+            self.assertEqual(signal["provenance"]["route_hints"][0]["display_label"], "socialos/brand")
+            self.assertTrue(signal["provenance"]["route_hints"][0]["legacy_internal_alias"])
+            self.assertIn("explicit lanes", signal["route_explanation"])
+
+    def test_load_signals_adds_bucket_fallback_route_provenance(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.json"
+            signals_path = tmp / "signals.json"
+            pending_path = tmp / "pending.json"
+            self.write_json(config_path, self.make_config())
+            self.write_json(signals_path, [
+                {
+                    "id": "2",
+                    "text": "Builder ships AI tooling",
+                    "username": "builderdao",
+                    "created_at": "2026-05-12T02:00:00+00:00",
+                    "_monitor_source": "account:builderdao",
+                    "_monitor_bucket": "builder",
+                    "_monitor_lanes": ["founder"],
+                    "_monitor_route_hints": ["x-engage/founder"],
+                    "_monitor_importance": "high",
+                    "_monitor_context": "Builder account",
+                }
+            ])
+            self.write_json(pending_path, [])
+
+            signal = x_monitor_api.load_signals(
+                limit=10,
+                signals_path=signals_path,
+                pending_path=pending_path,
+                config_path=config_path,
+            )["signals"][0]
+
+            self.assertEqual(signal["provenance"]["lane_source"], "bucket_fallback")
+            self.assertEqual(signal["provenance"]["bucket"], "builder")
+            self.assertEqual(signal["provenance"]["lanes"], ["founder"])
+            self.assertEqual(signal["provenance"]["matched_watchlist_items"][0]["lane_source"], "bucket_fallback")
+            self.assertIn("bucket fallback", signal["route_explanation"])
+
+
+class OperatorUiShellTests(unittest.TestCase):
+    def test_render_html_includes_command_docs_search_and_provenance_shell(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            config_path = tmp / "config.json"
+            signals_path = tmp / "signals.json"
+            pending_path = tmp / "pending.json"
+            config_path.write_text(json.dumps({
+                "lanes": [{"id": "brand", "name": "Brand", "buckets": ["desearch"], "route_hint": "x-engage/brand"}],
+                "accounts": [{"username": "desearch_ai", "bucket": "desearch", "lanes": ["brand"], "context": "Brand account"}],
+                "keywords": [],
+                "lists": [],
+            }), encoding="utf-8")
+            signals_path.write_text(json.dumps([{
+                "id": "ui-1",
+                "text": "Desearch signal for UI search",
+                "username": "desearch_ai",
+                "created_at": "2026-05-12T03:00:00+00:00",
+                "_monitor_source": "account:desearch_ai",
+                "_monitor_bucket": "desearch",
+                "_monitor_lanes": ["brand"],
+                "_monitor_route_hints": ["x-engage/brand"],
+            }]), encoding="utf-8")
+            pending_path.write_text("[]", encoding="utf-8")
+            previous = {
+                x_monitor_api.CONFIG_PATH_ENV: os.environ.get(x_monitor_api.CONFIG_PATH_ENV),
+                x_monitor_api.SIGNALS_PATH_ENV: os.environ.get(x_monitor_api.SIGNALS_PATH_ENV),
+                x_monitor_api.PENDING_PATH_ENV: os.environ.get(x_monitor_api.PENDING_PATH_ENV),
+            }
+            try:
+                os.environ[x_monitor_api.CONFIG_PATH_ENV] = str(config_path)
+                os.environ[x_monitor_api.SIGNALS_PATH_ENV] = str(signals_path)
+                os.environ[x_monitor_api.PENDING_PATH_ENV] = str(pending_path)
+                body = x_monitor_api.render_html().decode("utf-8")
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        self.assertIn('class="operator-shell"', body)
+        self.assertIn('data-page="overview"', body)
+        self.assertIn('data-page="install"', body)
+        self.assertIn('data-page="quick-start"', body)
+        self.assertIn('data-page="read-command"', body)
+        self.assertIn('data-page="actions"', body)
+        self.assertIn('id="signal-search"', body)
+        self.assertIn('data-search-index', body)
+        self.assertIn('Route provenance', body)
+        self.assertIn('legacy internal aliases', body)
 
 
 if __name__ == "__main__":
